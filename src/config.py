@@ -4,7 +4,7 @@ Configuration file for infant cry classification project
 import os
 
 # Dataset configuration
-DATASET_PATH = "infant-cry-audio-corpus/donateacry_corpus"
+DATASET_PATH = "/kaggle/input/infant-cry-audio-corpus/donateacry_corpus"
 CLASSES = ['belly_pain', 'burping', 'discomfort', 'hungry', 'tired']
 NUM_CLASSES = len(CLASSES)
 
