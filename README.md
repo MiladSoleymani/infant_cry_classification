@@ -80,6 +80,16 @@ Train using ResNet architecture:
 python train.py --model resnet --epochs 100
 ```
 
+Train with class balancing (recommended for imbalanced datasets):
+```bash
+python train.py --use-class-weights --use-weighted-sampler
+```
+
+Disable class balancing:
+```bash
+python train.py --no-class-weights --no-weighted-sampler
+```
+
 Available arguments:
 - `--data-path`: Path to dataset (default: from config)
 - `--model`: Model architecture (`cnn` or `resnet`)
@@ -87,6 +97,10 @@ Available arguments:
 - `--epochs`: Number of training epochs
 - `--learning-rate`: Learning rate for optimizer
 - `--save-freq`: Save checkpoint every N epochs
+- `--use-class-weights`: Use weighted loss function (enabled by default)
+- `--use-weighted-sampler`: Use weighted random sampler (enabled by default)
+- `--no-class-weights`: Disable class weights in loss
+- `--no-weighted-sampler`: Disable weighted sampling
 
 ### Evaluation
 
@@ -143,17 +157,49 @@ The pipeline includes:
    - Random pitch shifting
    - Random noise addition
 
+## Class Balancing
+
+The dataset is often imbalanced (e.g., "hungry" class has many more samples than "burping"). This project includes two complementary techniques to handle class imbalance:
+
+### 1. Weighted Loss Function
+Assigns higher weights to minority classes in the loss calculation, making the model pay more attention to underrepresented classes.
+
+### 2. Weighted Random Sampler
+Samples minority classes more frequently during training, ensuring balanced exposure to all classes.
+
+**Both are enabled by default** in `src/config.py`:
+- `USE_CLASS_WEIGHTS = True`
+- `USE_WEIGHTED_SAMPLER = True`
+
+**How it works:**
+- Class weights are computed as: `weight = total_samples / (num_classes * class_samples)`
+- Minority classes get higher weights (e.g., burping: 10.5, hungry: 0.7)
+- During training, the model sees a balanced distribution of all classes
+
+**Benefits:**
+- Prevents bias toward majority classes
+- Improves performance on minority classes
+- Better overall generalization
+
 ## Configuration
 
 Key parameters in `src/config.py`:
+
+**Audio Processing:**
 - `SAMPLE_RATE`: 16000 Hz
 - `DURATION`: 3 seconds
 - `N_MELS`: 128 mel bands
+
+**Training:**
 - `BATCH_SIZE`: 32
 - `EPOCHS`: 50
 - `LEARNING_RATE`: 0.001
 - `VALIDATION_SPLIT`: 0.2
 - `TEST_SPLIT`: 0.1
+
+**Class Balancing:**
+- `USE_CLASS_WEIGHTS`: True (use weighted loss)
+- `USE_WEIGHTED_SAMPLER`: True (use weighted sampling)
 
 ## Results
 

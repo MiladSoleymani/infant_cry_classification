@@ -121,9 +121,10 @@ def train(args):
 
     # Create data loaders
     print('\nLoading dataset...')
-    train_loader, val_loader, test_loader = get_data_loaders(
+    train_loader, val_loader, test_loader, class_weights = get_data_loaders(
         batch_size=args.batch_size,
-        dataset_path=args.data_path
+        dataset_path=args.data_path,
+        use_weighted_sampler=args.use_weighted_sampler
     )
 
     # Create model
@@ -136,7 +137,14 @@ def train(args):
     print(f'Number of trainable parameters: {num_params:,}')
 
     # Loss function and optimizer
-    criterion = nn.CrossEntropyLoss()
+    if args.use_class_weights:
+        class_weights = class_weights.to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        print("\nUsing weighted CrossEntropyLoss with class weights")
+    else:
+        criterion = nn.CrossEntropyLoss()
+        print("\nUsing standard CrossEntropyLoss")
+
     optimizer = optim.Adam(model.parameters(), lr=args.learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, verbose=True
@@ -226,6 +234,18 @@ if __name__ == '__main__':
                        help='Learning rate')
     parser.add_argument('--save-freq', type=int, default=10,
                        help='Save checkpoint every N epochs')
+    parser.add_argument('--use-class-weights', action='store_true',
+                       default=config.USE_CLASS_WEIGHTS,
+                       help='Use class weights in loss function')
+    parser.add_argument('--use-weighted-sampler', action='store_true',
+                       default=config.USE_WEIGHTED_SAMPLER,
+                       help='Use weighted random sampler for training')
+    parser.add_argument('--no-class-weights', dest='use_class_weights',
+                       action='store_false',
+                       help='Disable class weights')
+    parser.add_argument('--no-weighted-sampler', dest='use_weighted_sampler',
+                       action='store_false',
+                       help='Disable weighted sampler')
 
     args = parser.parse_args()
     train(args)

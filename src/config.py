@@ -26,6 +26,10 @@ VALIDATION_SPLIT = 0.2
 TEST_SPLIT = 0.1
 RANDOM_SEED = 42
 
+# Class balancing configuration
+USE_CLASS_WEIGHTS = True  # Use weighted loss function
+USE_WEIGHTED_SAMPLER = True  # Use weighted random sampler for training
+
 # Paths
 CHECKPOINT_DIR = "checkpoints"
 LOG_DIR = "logs"
