@@ -59,7 +59,12 @@ class CTCTrainer(Trainer):
         model.train()
         inputs = self._prepare_inputs(inputs)
 
-        if self.use_amp:
+        # Check for mixed precision training
+        use_amp = hasattr(self, 'use_amp') and self.use_amp
+        if not use_amp:
+            use_amp = self.args.fp16 and _is_native_amp_available
+
+        if use_amp:
             with autocast():
                 loss = self.compute_loss(model, inputs)
         else:
@@ -68,12 +73,12 @@ class CTCTrainer(Trainer):
         if self.args.gradient_accumulation_steps > 1:
             loss = loss / self.args.gradient_accumulation_steps
 
-        if self.use_amp:
+        if use_amp and hasattr(self, 'scaler'):
             self.scaler.scale(loss).backward()
-        elif self.use_apex:
+        elif hasattr(self, 'use_apex') and self.use_apex:
             with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                 scaled_loss.backward()
-        elif self.deepspeed:
+        elif hasattr(self, 'deepspeed') and self.deepspeed:
             self.deepspeed.backward(loss)
         else:
             loss.backward()
