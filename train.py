@@ -7,25 +7,14 @@ import sys
 import argparse
 from typing import Any, Dict, Union
 
-import numpy as np
 import torch
-from torch import nn
-from packaging import version
 
 from transformers import (
     AutoConfig,
     Trainer,
     TrainingArguments,
-    is_apex_available,
     set_seed,
 )
-
-if is_apex_available():
-    from apex import amp
-
-if version.parse(torch.__version__) >= version.parse("1.6"):
-    _is_native_amp_available = True
-    from torch.cuda.amp import autocast
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
@@ -39,51 +28,9 @@ from src.dataset import (
 from src.model import Wav2Vec2ForSpeechClassification, print_model_info
 
 
-class CTCTrainer(Trainer):
-    """
-    Custom trainer for CTC-based models
-    Based on the working notebook implementation
-    """
-    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None) -> torch.Tensor:
-        """
-        Perform a training step on a batch of inputs.
-
-        Args:
-            model: The model to train
-            inputs: The inputs and targets of the model
-            num_items_in_batch: Number of items in the batch (for newer transformers versions)
-
-        Returns:
-            The tensor with training loss on this batch
-        """
-        model.train()
-        inputs = self._prepare_inputs(inputs)
-
-        # Check for mixed precision training
-        use_amp = hasattr(self, 'use_amp') and self.use_amp
-        if not use_amp:
-            use_amp = self.args.fp16 and _is_native_amp_available
-
-        if use_amp:
-            with autocast():
-                loss = self.compute_loss(model, inputs)
-        else:
-            loss = self.compute_loss(model, inputs)
-
-        if self.args.gradient_accumulation_steps > 1:
-            loss = loss / self.args.gradient_accumulation_steps
-
-        if use_amp and hasattr(self, 'scaler'):
-            self.scaler.scale(loss).backward()
-        elif hasattr(self, 'use_apex') and self.use_apex:
-            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                scaled_loss.backward()
-        elif hasattr(self, 'deepspeed') and self.deepspeed:
-            self.deepspeed.backward(loss)
-        else:
-            loss.backward()
-
-        return loss.detach()
+# We can use the standard Trainer since our model returns loss in forward pass
+# CTCTrainer was needed in the original notebook for specific use cases
+# but our Wav2Vec2ForSpeechClassification already handles loss computation
 
 
 def train(
@@ -214,14 +161,14 @@ def train(
 
     # Create trainer
     print("\nInitializing trainer...")
-    trainer = CTCTrainer(
+    trainer = Trainer(
         model=model,
         data_collator=data_collator,
         args=training_args,
         compute_metrics=compute_metrics,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        # tokenizer=feature_extractor,
+        tokenizer=feature_extractor,
     )
 
     # Train
