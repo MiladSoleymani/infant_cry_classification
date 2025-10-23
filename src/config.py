@@ -51,11 +51,18 @@ USE_CLASS_WEIGHTS = False  # Use weighted loss function
 USE_WEIGHTED_SAMPLER = False  # Use weighted random sampler for training
 
 # Undersampling configuration
-USE_UNDERSAMPLING = True  # Whether to undersample majority classes
+USE_UNDERSAMPLING = False  # Whether to undersample majority classes
 UNDERSAMPLING_STRATEGY = "auto"  # "auto", "minority", or int (samples per class)
 # "auto" - Match second-largest class (recommended to avoid too much data loss)
 # "minority" - Match smallest class (most balanced but loses most data)
 # int (e.g., 50) - Fixed number of samples per class
+
+# Oversampling configuration (with augmentation)
+USE_OVERSAMPLING = True  # Whether to oversample minority classes with augmentation
+OVERSAMPLING_STRATEGY = "auto"  # "auto", "majority", or int (samples per class)
+# "auto" - Match largest class (recommended - no data loss, adds augmented samples)
+# "majority" - Same as auto, match largest class
+# int (e.g., 500) - Fixed number of samples per class
 
 # Paths
 CHECKPOINT_DIR = "checkpoints"

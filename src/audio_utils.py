@@ -89,17 +89,22 @@ def pad_or_truncate(audio: np.ndarray, target_length: int = config.TARGET_LENGTH
     return audio
 
 
-def augment_audio(audio: np.ndarray, sr: int = config.SAMPLE_RATE) -> np.ndarray:
+def augment_audio(audio: np.ndarray, sr: int = config.SAMPLE_RATE, seed: int = None) -> np.ndarray:
     """
     Apply data augmentation to audio
 
     Args:
         audio: Audio array
         sr: Sample rate
+        seed: Random seed for reproducible augmentation (optional)
 
     Returns:
         Augmented audio
     """
+    # Set seed if provided for reproducible augmentation
+    if seed is not None:
+        np.random.seed(seed)
+
     augmented = audio.copy()
 
     # Random time shift

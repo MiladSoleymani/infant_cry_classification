@@ -67,10 +67,12 @@ def prepare_dataset_csv(
     test_split: float = config.TEST_SPLIT,
     random_seed: int = config.RANDOM_SEED,
     use_undersampling: bool = False,
-    undersampling_strategy: str = "auto"
+    undersampling_strategy: str = "auto",
+    use_oversampling: bool = False,
+    oversampling_strategy: str = "auto"
 ):
     """
-    Prepare CSV files for dataset loading with optional undersampling
+    Prepare CSV files for dataset loading with optional undersampling/oversampling
 
     Args:
         dataset_path: Path to dataset root directory
@@ -83,6 +85,11 @@ def prepare_dataset_csv(
             - "auto": Match the second-largest class count
             - "minority": Match the smallest class count
             - int: Specific number of samples per class
+        use_oversampling: Whether to apply oversampling with augmentation
+        oversampling_strategy: Strategy for oversampling
+            - "auto": Match the largest class count
+            - "majority": Match the largest class count (same as auto)
+            - int: Specific target samples per class
 
     Returns:
         Paths to train, validation, and test CSV files
@@ -173,6 +180,80 @@ def prepare_dataset_csv(
         print(df.groupby("label").count()[["path"]])
         print("="*80)
 
+    # Apply oversampling if requested
+    if use_oversampling:
+        print("\n" + "="*80)
+        print("Applying oversampling with augmentation to balance classes...")
+        print("="*80)
+
+        # Calculate target samples per class
+        counts = df["label"].value_counts()
+
+        if oversampling_strategy in ["auto", "majority"]:
+            # Match the largest class
+            target_samples = counts.max()
+            print(f"Strategy: Match majority class ({target_samples} samples per class)")
+        elif isinstance(oversampling_strategy, int):
+            target_samples = oversampling_strategy
+            print(f"Strategy: Fixed {target_samples} samples per class")
+        else:
+            target_samples = counts.max()
+            print(f"Strategy: Default to majority class ({target_samples} samples per class)")
+
+        # Oversample each class with augmentation markers
+        balanced_dfs = []
+        np.random.seed(random_seed)
+
+        for class_name in df["label"].unique():
+            class_df = df[df["label"] == class_name].copy()
+            original_count = len(class_df)
+
+            if original_count < target_samples:
+                # Calculate how many augmented copies we need
+                needed_samples = target_samples - original_count
+
+                # Add augmentation_id column to original samples
+                class_df["augmentation_id"] = 0
+
+                # Create augmented copies
+                augmented_copies = []
+                copies_per_original = needed_samples // original_count + 1
+
+                for aug_id in range(1, copies_per_original + 1):
+                    aug_df = class_df[["path", "label"]].copy()
+                    aug_df["augmentation_id"] = aug_id
+                    augmented_copies.append(aug_df)
+
+                # Combine original and augmented
+                all_samples = pd.concat([class_df] + augmented_copies, ignore_index=True)
+
+                # Sample exactly target_samples
+                class_df_sampled = all_samples.sample(n=target_samples, random_state=random_seed)
+
+                print(f"  {class_name}: {original_count} → {target_samples} samples ({needed_samples} augmented)")
+            else:
+                # Keep all samples if class already has enough
+                class_df["augmentation_id"] = 0
+                class_df_sampled = class_df
+                print(f"  {class_name}: {original_count} samples (kept all)")
+
+            balanced_dfs.append(class_df_sampled)
+
+        # Combine balanced dataframes
+        df = pd.concat(balanced_dfs, ignore_index=True)
+
+        # Shuffle the combined dataset
+        df = df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
+
+        print(f"\nAfter oversampling: {len(df)} total samples")
+        print("\nBalanced class distribution:")
+        print(df.groupby("label").count()[["path"]])
+        print(f"Augmented samples: {len(df[df['augmentation_id'] > 0])}")
+        print("="*80)
+    else:
+        # Add augmentation_id = 0 for all samples (no augmentation)
+        df["augmentation_id"] = 0
+
     # Split data into train, validation, and test sets
     train_df, rest_df = train_test_split(
         df,
@@ -258,7 +339,7 @@ def preprocess_function(
     feature_extractor: Wav2Vec2FeatureExtractor
 ) -> Dict:
     """
-    Preprocess function for dataset mapping
+    Preprocess function for dataset mapping with augmentation support
     Based on the notebook's approach
 
     Args:
@@ -271,12 +352,22 @@ def preprocess_function(
     Returns:
         Processed batch with input_values and labels
     """
+    from audio_utils import augment_audio
     target_sampling_rate = feature_extractor.sampling_rate
 
-    speech_list = [
-        speech_file_to_array_fn(path, target_sampling_rate)
-        for path in examples[input_column]
-    ]
+    # Load audio and apply augmentation if augmentation_id > 0
+    speech_list = []
+    for i, path in enumerate(examples[input_column]):
+        speech = speech_file_to_array_fn(path, target_sampling_rate)
+
+        # Apply augmentation if augmentation_id > 0
+        # Use augmentation_id as seed to ensure different augmentation for each copy
+        if "augmentation_id" in examples and examples["augmentation_id"][i] > 0:
+            aug_seed = hash(path + str(examples["augmentation_id"][i])) % (2**32)
+            speech = augment_audio(speech, sr=target_sampling_rate, seed=aug_seed)
+
+        speech_list.append(speech)
+
     target_list = [
         label_to_id(label, label_list)
         for label in examples[output_column]
@@ -293,7 +384,9 @@ def load_and_prepare_datasets(
     save_path: str = ".",
     model_name: str = config.WAV2VEC2_MODEL_NAME,
     use_undersampling: bool = False,
-    undersampling_strategy: str = "auto"
+    undersampling_strategy: str = "auto",
+    use_oversampling: bool = False,
+    oversampling_strategy: str = "auto"
 ) -> tuple:
     """
     Load and prepare datasets using HuggingFace datasets library
@@ -305,16 +398,20 @@ def load_and_prepare_datasets(
         model_name: Wav2Vec2 model name for feature extractor
         use_undersampling: Whether to apply undersampling to balance classes
         undersampling_strategy: Strategy for undersampling ("auto", "minority", or int)
+        use_oversampling: Whether to apply oversampling with augmentation
+        oversampling_strategy: Strategy for oversampling ("auto", "majority", or int)
 
     Returns:
         Tuple of (train_dataset, eval_dataset, test_dataset, feature_extractor, label_list, num_labels)
     """
-    # Prepare CSV files with optional undersampling
+    # Prepare CSV files with optional undersampling/oversampling
     train_csv, val_csv, test_csv = prepare_dataset_csv(
         dataset_path,
         save_path,
         use_undersampling=use_undersampling,
-        undersampling_strategy=undersampling_strategy
+        undersampling_strategy=undersampling_strategy,
+        use_oversampling=use_oversampling,
+        oversampling_strategy=oversampling_strategy
     )
 
     # Load datasets from CSV
