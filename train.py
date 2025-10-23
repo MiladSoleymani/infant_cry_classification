@@ -213,7 +213,7 @@ def train(
         compute_metrics=compute_metrics,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        tokenizer=feature_extractor,
+        # tokenizer=feature_extractor,
     )
 
     # Train
