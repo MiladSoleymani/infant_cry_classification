@@ -1,6 +1,7 @@
 """
 Audio processing utilities for Wav2Vec2-based infant cry classification
 """
+import os
 import librosa
 import numpy as np
 import torch
@@ -23,7 +24,26 @@ def get_processor():
     """
     global processor
     if processor is None:
-        processor = Wav2Vec2Processor.from_pretrained(config.WAV2VEC2_MODEL_NAME)
+        try:
+            if config.USE_CACHE and os.path.exists(config.CACHE_DIR):
+                print(f"Loading processor from cache: {config.CACHE_DIR}")
+                processor = Wav2Vec2Processor.from_pretrained(
+                    config.CACHE_DIR,
+                    local_files_only=True
+                )
+            else:
+                print(f"Downloading processor from HuggingFace: {config.WAV2VEC2_MODEL_NAME}")
+                processor = Wav2Vec2Processor.from_pretrained(
+                    config.WAV2VEC2_MODEL_NAME,
+                    cache_dir=config.CACHE_DIR if config.USE_CACHE else None
+                )
+        except Exception as e:
+            print(f"\n✗ Error loading Wav2Vec2Processor: {e}")
+            print("\nTroubleshooting:")
+            print("1. If offline, run: python download_model.py")
+            print("2. Check internet connection")
+            print(f"3. Verify cache directory: {config.CACHE_DIR}")
+            raise
     return processor
 
 

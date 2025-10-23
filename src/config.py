@@ -14,6 +14,10 @@ WAV2VEC2_MODEL_NAME = "facebook/wav2vec2-base"  # Pre-trained model
 # "facebook/wav2vec2-large" - Larger model, better performance
 # "facebook/wav2vec2-base-960h" - Fine-tuned on LibriSpeech
 
+# Model cache directory (for offline use in Kaggle)
+CACHE_DIR = "/kaggle/working/wav2vec2_cache"
+USE_CACHE = True  # Set to True for Kaggle/offline environments
+
 # Audio processing configuration
 SAMPLE_RATE = 16000  # Wav2Vec2 requires 16kHz
 MAX_DURATION = 5.0  # Maximum duration in seconds

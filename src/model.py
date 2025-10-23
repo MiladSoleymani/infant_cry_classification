@@ -1,6 +1,7 @@
 """
 Wav2Vec2-based model architectures for infant cry classification
 """
+import os
 import torch
 import torch.nn as nn
 from transformers import Wav2Vec2Model, Wav2Vec2Config
@@ -32,14 +33,36 @@ class Wav2Vec2ForAudioClassification(nn.Module):
         super().__init__()
 
         # Load pre-trained Wav2Vec2 model
-        self.wav2vec2 = Wav2Vec2Model.from_pretrained(
-            model_name,
-            attention_dropout=config.ATTENTION_DROPOUT,
-            hidden_dropout=config.HIDDEN_DROPOUT,
-            feat_proj_dropout=dropout,
-            mask_time_prob=0.05,  # Reduced masking for fine-tuning
-            layerdrop=0.05
-        )
+        try:
+            if config.USE_CACHE and os.path.exists(config.CACHE_DIR):
+                print(f"Loading model from cache: {config.CACHE_DIR}")
+                self.wav2vec2 = Wav2Vec2Model.from_pretrained(
+                    config.CACHE_DIR,
+                    local_files_only=True,
+                    attention_dropout=config.ATTENTION_DROPOUT,
+                    hidden_dropout=config.HIDDEN_DROPOUT,
+                    feat_proj_dropout=dropout,
+                    mask_time_prob=0.05,
+                    layerdrop=0.05
+                )
+            else:
+                print(f"Downloading model from HuggingFace: {model_name}")
+                self.wav2vec2 = Wav2Vec2Model.from_pretrained(
+                    model_name,
+                    cache_dir=config.CACHE_DIR if config.USE_CACHE else None,
+                    attention_dropout=config.ATTENTION_DROPOUT,
+                    hidden_dropout=config.HIDDEN_DROPOUT,
+                    feat_proj_dropout=dropout,
+                    mask_time_prob=0.05,
+                    layerdrop=0.05
+                )
+        except Exception as e:
+            print(f"\n✗ Error loading Wav2Vec2 model: {e}")
+            print("\nTroubleshooting:")
+            print("1. If offline, run: python download_model.py")
+            print("2. Check internet connection")
+            print(f"3. Verify cache directory: {config.CACHE_DIR}")
+            raise
 
         # Freeze feature extractor (CNN layers) if requested
         if freeze_feature_extractor:
@@ -122,12 +145,32 @@ class Wav2Vec2WithAttentionPooling(nn.Module):
         super().__init__()
 
         # Load pre-trained Wav2Vec2
-        self.wav2vec2 = Wav2Vec2Model.from_pretrained(
-            model_name,
-            attention_dropout=config.ATTENTION_DROPOUT,
-            hidden_dropout=config.HIDDEN_DROPOUT,
-            feat_proj_dropout=dropout
-        )
+        try:
+            if config.USE_CACHE and os.path.exists(config.CACHE_DIR):
+                print(f"Loading model from cache: {config.CACHE_DIR}")
+                self.wav2vec2 = Wav2Vec2Model.from_pretrained(
+                    config.CACHE_DIR,
+                    local_files_only=True,
+                    attention_dropout=config.ATTENTION_DROPOUT,
+                    hidden_dropout=config.HIDDEN_DROPOUT,
+                    feat_proj_dropout=dropout
+                )
+            else:
+                print(f"Downloading model from HuggingFace: {model_name}")
+                self.wav2vec2 = Wav2Vec2Model.from_pretrained(
+                    model_name,
+                    cache_dir=config.CACHE_DIR if config.USE_CACHE else None,
+                    attention_dropout=config.ATTENTION_DROPOUT,
+                    hidden_dropout=config.HIDDEN_DROPOUT,
+                    feat_proj_dropout=dropout
+                )
+        except Exception as e:
+            print(f"\n✗ Error loading Wav2Vec2 model: {e}")
+            print("\nTroubleshooting:")
+            print("1. If offline, run: python download_model.py")
+            print("2. Check internet connection")
+            print(f"3. Verify cache directory: {config.CACHE_DIR}")
+            raise
 
         if freeze_feature_extractor:
             self.wav2vec2.feature_extractor._freeze_parameters()
