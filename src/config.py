@@ -9,11 +9,14 @@ CLASSES = ['belly_pain', 'burping', 'discomfort', 'hungry', 'tired']
 NUM_CLASSES = len(CLASSES)
 
 # Wav2Vec2 model configuration
-# WAV2VEC2_MODEL_NAME = "facebook/wav2vec2-base"  # Pre-trained model
 WAV2VEC2_MODEL_NAME = "facebook/wav2vec2-base-100k-voxpopuli"
 # Alternative models:
+# "facebook/wav2vec2-base" - Base model
 # "facebook/wav2vec2-large" - Larger model, better performance
 # "facebook/wav2vec2-base-960h" - Fine-tuned on LibriSpeech
+
+# Pooling mode for classification head
+POOLING_MODE = "mean"  # Options: "mean", "sum", "max"
 
 # Model cache directory (for offline use in Kaggle)
 CACHE_DIR = "/kaggle/working/wav2vec2_cache"
@@ -41,6 +44,7 @@ FREEZE_EPOCHS = 5  # Unfreeze after this many epochs
 DROPOUT = 0.1
 ATTENTION_DROPOUT = 0.1
 HIDDEN_DROPOUT = 0.1
+FINAL_DROPOUT = 0.1  # Dropout for classification head
 
 # Class balancing configuration
 USE_CLASS_WEIGHTS = True  # Use weighted loss function

@@ -1,116 +1,92 @@
 """
-Dataset class for Wav2Vec2-based infant cry classification
+Dataset preparation for Wav2Vec2-based infant cry classification
+Using HuggingFace datasets library (based on working notebook implementation)
 """
 import os
 from pathlib import Path
-from typing import Tuple, List
+from typing import Dict, List, Union, Optional
+from dataclasses import dataclass
+
 import numpy as np
+import pandas as pd
 import torch
-from torch.utils.data import Dataset, WeightedRandomSampler
+import torchaudio
+import librosa
+from transformers import Wav2Vec2FeatureExtractor
+from datasets import load_dataset, Dataset, DatasetDict
 from sklearn.model_selection import train_test_split
-from sklearn.utils.class_weight import compute_class_weight
+
 import config
-from audio_utils import load_audio, pad_or_truncate, augment_audio
 
 
-class InfantCryDataset(Dataset):
+@dataclass
+class DataCollatorCTCWithPadding:
     """
-    PyTorch Dataset for infant cry classification using raw audio
+    Data collator that will dynamically pad the inputs received.
+    Based on DataCollatorCTCWithPadding from the working notebook
     """
+    feature_extractor: Wav2Vec2FeatureExtractor
+    padding: Union[bool, str] = True
+    max_length: Optional[int] = None
+    max_length_labels: Optional[int] = None
+    pad_to_multiple_of: Optional[int] = None
+    pad_to_multiple_of_labels: Optional[int] = None
 
-    def __init__(self, file_paths: List[str], labels: List[int],
-                 augment: bool = False):
+    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
         """
-        Initialize dataset
+        Collate function for batching
 
         Args:
-            file_paths: List of audio file paths
-            labels: List of corresponding labels
-            augment: Whether to apply data augmentation
-        """
-        self.file_paths = file_paths
-        self.labels = labels
-        self.augment = augment
-
-    def __len__(self) -> int:
-        return len(self.file_paths)
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int]:
-        """
-        Get a single sample
-
-        Args:
-            idx: Sample index
+            features: List of feature dictionaries with input_values and labels
 
         Returns:
-            Tuple of (audio_tensor, label)
+            Batched dictionary with input_values and labels tensors
         """
-        file_path = self.file_paths[idx]
-        label = self.labels[idx]
+        input_features = [{"input_values": feature["input_values"]} for feature in features]
+        label_features = [feature["labels"] for feature in features]
 
-        # Load audio
-        audio = load_audio(file_path)
+        d_type = torch.long if isinstance(label_features[0], int) else torch.float
 
-        # Apply augmentation if training
-        if self.augment:
-            audio = augment_audio(audio)
+        batch = self.feature_extractor.pad(
+            input_features,
+            padding=self.padding,
+            max_length=self.max_length,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors="pt",
+        )
 
-        # Pad or truncate to fixed length
-        audio = pad_or_truncate(audio)
+        batch["labels"] = torch.tensor(label_features, dtype=d_type)
 
-        # Convert to tensor
-        audio_tensor = torch.FloatTensor(audio)
-
-        return audio_tensor, label
+        return batch
 
 
-def collate_fn_wav2vec2(batch):
+def prepare_dataset_csv(
+    dataset_path: str = config.DATASET_PATH,
+    save_path: str = ".",
+    val_split: float = config.VALIDATION_SPLIT,
+    test_split: float = config.TEST_SPLIT,
+    random_seed: int = config.RANDOM_SEED
+):
     """
-    Custom collate function for Wav2Vec2 that handles batching properly
-
-    Args:
-        batch: List of (audio, label) tuples
-
-    Returns:
-        Dictionary with input_values, attention_mask, and labels
-    """
-    from audio_utils import get_processor
-
-    audios = [item[0].numpy() for item in batch]
-    labels = [item[1] for item in batch]
-
-    # Process batch with Wav2Vec2 processor
-    processor = get_processor()
-    inputs = processor(
-        audios,
-        sampling_rate=config.SAMPLE_RATE,
-        return_tensors="pt",
-        padding=True,
-        return_attention_mask=True
-    )
-
-    inputs['labels'] = torch.tensor(labels, dtype=torch.long)
-
-    return inputs
-
-
-def load_dataset(dataset_path: str = config.DATASET_PATH) -> Tuple[List[str], List[int]]:
-    """
-    Load all audio files and labels from dataset directory
+    Prepare CSV files for dataset loading
+    Similar to the notebook's approach
 
     Args:
         dataset_path: Path to dataset root directory
+        save_path: Path to save CSV files
+        val_split: Validation set proportion
+        test_split: Test set proportion
+        random_seed: Random seed for reproducibility
 
     Returns:
-        Tuple of (file_paths, labels)
+        Paths to train, validation, and test CSV files
     """
-    file_paths = []
-    labels = []
+    data = []
 
     # Create label mapping
     class_to_idx = {class_name: idx for idx, class_name in enumerate(config.CLASSES)}
 
-    # Iterate through each class directory
+    # Iterate through each class directory and collect file paths
     for class_name in config.CLASSES:
         class_dir = os.path.join(dataset_path, class_name)
 
@@ -122,174 +98,231 @@ def load_dataset(dataset_path: str = config.DATASET_PATH) -> Tuple[List[str], Li
         wav_files = list(Path(class_dir).glob('*.wav'))
 
         for wav_file in wav_files:
-            file_paths.append(str(wav_file))
-            labels.append(class_to_idx[class_name])
+            data.append({
+                "path": str(wav_file),
+                "label": class_name
+            })
 
-    print(f"Loaded {len(file_paths)} audio files from {len(config.CLASSES)} classes")
-    for class_name, idx in class_to_idx.items():
-        count = labels.count(idx)
-        print(f"  {class_name}: {count} samples")
+    # Create DataFrame
+    df = pd.DataFrame(data)
+    print(f"\nLoaded {len(df)} audio files from {len(config.CLASSES)} classes")
+    print(df.groupby("label").count()[["path"]])
 
-    return file_paths, labels
-
-
-def create_data_splits(file_paths: List[str], labels: List[int],
-                      val_split: float = config.VALIDATION_SPLIT,
-                      test_split: float = config.TEST_SPLIT,
-                      random_seed: int = config.RANDOM_SEED) -> Tuple:
-    """
-    Split data into train, validation, and test sets
-
-    Args:
-        file_paths: List of audio file paths
-        labels: List of corresponding labels
-        val_split: Validation set proportion
-        test_split: Test set proportion
-        random_seed: Random seed for reproducibility
-
-    Returns:
-        Tuple of (train_files, train_labels, val_files, val_labels, test_files, test_labels)
-    """
-    # First split: separate test set
-    train_val_files, test_files, train_val_labels, test_labels = train_test_split(
-        file_paths, labels, test_size=test_split, random_state=random_seed, stratify=labels
+    # Split data into train, validation, and test sets
+    train_df, rest_df = train_test_split(
+        df,
+        test_size=(val_split + test_split),
+        random_state=random_seed,
+        stratify=df["label"]
     )
 
-    # Second split: separate validation from training
-    val_size_adjusted = val_split / (1 - test_split)
-    train_files, val_files, train_labels, val_labels = train_test_split(
-        train_val_files, train_val_labels, test_size=val_size_adjusted,
-        random_state=random_seed, stratify=train_val_labels
+    val_size_adjusted = val_split / (val_split + test_split)
+    val_df, test_df = train_test_split(
+        rest_df,
+        test_size=(1 - val_size_adjusted),
+        random_state=random_seed,
+        stratify=rest_df["label"]
     )
+
+    # Reset indices
+    train_df = train_df.reset_index(drop=True)
+    val_df = val_df.reset_index(drop=True)
+    test_df = test_df.reset_index(drop=True)
+
+    # Save to CSV
+    os.makedirs(save_path, exist_ok=True)
+    train_csv = os.path.join(save_path, "train.csv")
+    val_csv = os.path.join(save_path, "validation.csv")
+    test_csv = os.path.join(save_path, "test.csv")
+
+    train_df.to_csv(train_csv, encoding="utf-8", index=False)
+    val_df.to_csv(val_csv, encoding="utf-8", index=False)
+    test_df.to_csv(test_csv, encoding="utf-8", index=False)
 
     print(f"\nDataset splits:")
-    print(f"  Training: {len(train_files)} samples")
-    print(f"  Validation: {len(val_files)} samples")
-    print(f"  Test: {len(test_files)} samples")
+    print(f"  Training: {len(train_df)} samples")
+    print(f"  Validation: {len(val_df)} samples")
+    print(f"  Test: {len(test_df)} samples")
 
-    return train_files, train_labels, val_files, val_labels, test_files, test_labels
+    return train_csv, val_csv, test_csv
 
 
-def compute_class_weights(labels: List[int]) -> torch.Tensor:
+def speech_file_to_array_fn(path: str, target_sampling_rate: int) -> np.ndarray:
     """
-    Compute class weights for imbalanced dataset
+    Load and resample audio file to target sampling rate
 
     Args:
-        labels: List of labels
+        path: Path to audio file
+        target_sampling_rate: Target sampling rate (16000 for Wav2Vec2)
 
     Returns:
-        Tensor of class weights
+        Audio array
     """
-    labels_array = np.array(labels)
-    class_weights = compute_class_weight(
-        class_weight='balanced',
-        classes=np.unique(labels_array),
-        y=labels_array
-    )
-
-    print(f"\nClass weights for loss function:")
-    for i, class_name in enumerate(config.CLASSES):
-        print(f"  {class_name}: {class_weights[i]:.4f}")
-
-    return torch.FloatTensor(class_weights)
+    try:
+        speech_array, sampling_rate = torchaudio.load(path)
+        resampler = torchaudio.transforms.Resample(sampling_rate, target_sampling_rate)
+        speech = resampler(speech_array).squeeze().numpy()
+        return speech
+    except Exception as e:
+        print(f"Error loading {path}: {e}")
+        # Return silence if loading fails
+        return np.zeros(target_sampling_rate)
 
 
-def create_weighted_sampler(labels: List[int]) -> WeightedRandomSampler:
+def label_to_id(label: str, label_list: List[str]) -> int:
     """
-    Create weighted random sampler for imbalanced dataset
+    Convert label string to ID
 
     Args:
-        labels: List of training labels
+        label: Label string
+        label_list: List of all labels
 
     Returns:
-        WeightedRandomSampler instance
+        Label ID
     """
-    # Count samples per class
-    class_counts = np.bincount(labels)
-
-    # Calculate weights (inverse of class frequency)
-    class_weights = 1.0 / class_counts
-
-    # Assign weight to each sample based on its class
-    sample_weights = [class_weights[label] for label in labels]
-
-    print(f"\nWeighted sampler statistics:")
-    for i, class_name in enumerate(config.CLASSES):
-        print(f"  {class_name}: count={class_counts[i]}, weight={class_weights[i]:.4f}")
-
-    sampler = WeightedRandomSampler(
-        weights=sample_weights,
-        num_samples=len(sample_weights),
-        replacement=True
-    )
-
-    return sampler
+    if len(label_list) > 0:
+        return label_list.index(label) if label in label_list else -1
+    return label
 
 
-def get_data_loaders(batch_size: int = config.BATCH_SIZE,
-                    dataset_path: str = config.DATASET_PATH,
-                    use_weighted_sampler: bool = config.USE_WEIGHTED_SAMPLER):
+def preprocess_function(
+    examples: Dict,
+    input_column: str,
+    output_column: str,
+    label_list: List[str],
+    feature_extractor: Wav2Vec2FeatureExtractor
+) -> Dict:
     """
-    Create PyTorch DataLoaders for train, validation, and test sets
+    Preprocess function for dataset mapping
+    Based on the notebook's approach
 
     Args:
-        batch_size: Batch size for data loaders
+        examples: Batch of examples from dataset
+        input_column: Name of input column (path)
+        output_column: Name of output column (label)
+        label_list: List of all labels
+        feature_extractor: Wav2Vec2FeatureExtractor instance
+
+    Returns:
+        Processed batch with input_values and labels
+    """
+    target_sampling_rate = feature_extractor.sampling_rate
+
+    speech_list = [
+        speech_file_to_array_fn(path, target_sampling_rate)
+        for path in examples[input_column]
+    ]
+    target_list = [
+        label_to_id(label, label_list)
+        for label in examples[output_column]
+    ]
+
+    result = feature_extractor(speech_list, sampling_rate=target_sampling_rate)
+    result["labels"] = list(target_list)
+
+    return result
+
+
+def load_and_prepare_datasets(
+    dataset_path: str = config.DATASET_PATH,
+    save_path: str = ".",
+    model_name: str = config.WAV2VEC2_MODEL_NAME
+) -> tuple:
+    """
+    Load and prepare datasets using HuggingFace datasets library
+    Following the notebook's approach
+
+    Args:
         dataset_path: Path to dataset root directory
-        use_weighted_sampler: Whether to use weighted sampling for training
+        save_path: Path to save CSV files
+        model_name: Wav2Vec2 model name for feature extractor
 
     Returns:
-        Tuple of (train_loader, val_loader, test_loader, class_weights)
+        Tuple of (train_dataset, eval_dataset, feature_extractor, label_list, num_labels)
     """
-    # Load dataset
-    file_paths, labels = load_dataset(dataset_path)
+    # Prepare CSV files
+    train_csv, val_csv, test_csv = prepare_dataset_csv(dataset_path, save_path)
 
-    # Create splits
-    train_files, train_labels, val_files, val_labels, test_files, test_labels = \
-        create_data_splits(file_paths, labels)
+    # Load datasets from CSV
+    data_files = {
+        "train": train_csv,
+        "validation": val_csv,
+        "test": test_csv,
+    }
 
-    # Compute class weights for loss function
-    class_weights = compute_class_weights(train_labels)
+    dataset = load_dataset("csv", data_files=data_files)
 
-    # Create datasets
-    train_dataset = InfantCryDataset(train_files, train_labels, augment=True)
-    val_dataset = InfantCryDataset(val_files, val_labels, augment=False)
-    test_dataset = InfantCryDataset(test_files, test_labels, augment=False)
+    train_dataset = dataset["train"]
+    eval_dataset = dataset["validation"]
+    test_dataset = dataset["test"]
 
-    # Create weighted sampler if enabled
-    if use_weighted_sampler:
-        train_sampler = create_weighted_sampler(train_labels)
-        shuffle = False  # Don't shuffle when using sampler
-        print("\nUsing weighted random sampler for training")
-    else:
-        train_sampler = None
-        shuffle = True
-        print("\nUsing standard random shuffling for training")
+    # Define input and output columns
+    input_column = "path"
+    output_column = "label"
 
-    # Create data loaders with custom collate function
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        sampler=train_sampler,
-        shuffle=shuffle if train_sampler is None else False,
-        collate_fn=collate_fn_wav2vec2,
-        num_workers=2,  # Reduced for Wav2Vec2
-        pin_memory=True
+    # Get unique labels
+    label_list = train_dataset.unique(output_column)
+    label_list.sort()  # Sort for determinism
+    num_labels = len(label_list)
+
+    print(f"\nA classification problem with {num_labels} classes:")
+    print(f"  {label_list}")
+
+    # Load feature extractor
+    print(f"\nLoading feature extractor from: {model_name}")
+    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(model_name)
+    target_sampling_rate = feature_extractor.sampling_rate
+    print(f"Target sampling rate: {target_sampling_rate}")
+
+    # Create preprocessing function with fixed parameters
+    def preprocess_fn(examples):
+        return preprocess_function(
+            examples,
+            input_column,
+            output_column,
+            label_list,
+            feature_extractor
+        )
+
+    # Map preprocessing to datasets
+    print("\nPreprocessing training dataset...")
+    train_dataset = train_dataset.map(
+        preprocess_fn,
+        batch_size=10,
+        batched=True,
+        remove_columns=[input_column]
     )
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn_wav2vec2,
-        num_workers=2,
-        pin_memory=True
-    )
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=collate_fn_wav2vec2,
-        num_workers=2,
-        pin_memory=True
+
+    print("Preprocessing validation dataset...")
+    eval_dataset = eval_dataset.map(
+        preprocess_fn,
+        batch_size=10,
+        batched=True,
+        remove_columns=[input_column]
     )
 
-    return train_loader, val_loader, test_loader, class_weights
+    print("Preprocessing test dataset...")
+    test_dataset = test_dataset.map(
+        preprocess_fn,
+        batch_size=10,
+        batched=True,
+        remove_columns=[input_column]
+    )
+
+    return train_dataset, eval_dataset, test_dataset, feature_extractor, label_list, num_labels
+
+
+def compute_metrics(p):
+    """
+    Compute metrics for evaluation
+
+    Args:
+        p: EvalPrediction object
+
+    Returns:
+        Dictionary with accuracy metric
+    """
+    preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
+    preds = np.argmax(preds, axis=1)
+
+    return {"accuracy": (preds == p.label_ids).astype(np.float32).mean().item()}

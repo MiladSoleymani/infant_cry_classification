@@ -1,85 +1,62 @@
 """
-Wav2Vec2-based model architectures for infant cry classification
+Wav2Vec2-based model for infant cry classification
+Based on working implementation from music genre classification
 """
-import os
 import torch
 import torch.nn as nn
-from transformers import Wav2Vec2Model, Wav2Vec2Config
-from typing import Optional
+from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+from transformers import Wav2Vec2PreTrainedModel, Wav2Vec2Model
+from transformers.file_utils import ModelOutput
+
 import config
 
 
-class Wav2Vec2ForAudioClassification(nn.Module):
-    """
-    Wav2Vec2 model with classification head for infant cry classification
-    """
+@dataclass
+class SpeechClassifierOutput(ModelOutput):
+    """Output type for speech classification"""
+    loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
 
-    def __init__(
-        self,
-        model_name: str = config.WAV2VEC2_MODEL_NAME,
-        num_labels: int = config.NUM_CLASSES,
-        dropout: float = config.DROPOUT,
-        freeze_feature_extractor: bool = config.FREEZE_FEATURE_EXTRACTOR
-    ):
-        """
-        Initialize Wav2Vec2 classification model
 
-        Args:
-            model_name: Pre-trained Wav2Vec2 model name
-            num_labels: Number of output classes
-            dropout: Dropout probability
-            freeze_feature_extractor: Whether to freeze CNN feature extractor
-        """
+class Wav2Vec2ClassificationHead(nn.Module):
+    """Head for wav2vec2 classification task."""
+
+    def __init__(self, config):
         super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.final_dropout)
+        self.out_proj = nn.Linear(config.hidden_size, config.num_labels)
 
-        # Load pre-trained Wav2Vec2 model
-        try:
-            if config.USE_CACHE and os.path.exists(config.CACHE_DIR):
-                print(f"Loading model from cache: {config.CACHE_DIR}")
-                self.wav2vec2 = Wav2Vec2Model.from_pretrained(
-                    config.CACHE_DIR,
-                    local_files_only=True,
-                    attention_dropout=config.ATTENTION_DROPOUT,
-                    hidden_dropout=config.HIDDEN_DROPOUT,
-                    feat_proj_dropout=dropout,
-                    mask_time_prob=0.05,
-                    layerdrop=0.05
-                )
-            else:
-                print(f"Downloading model from HuggingFace: {model_name}")
-                self.wav2vec2 = Wav2Vec2Model.from_pretrained(
-                    model_name,
-                    cache_dir=config.CACHE_DIR if config.USE_CACHE else None,
-                    attention_dropout=config.ATTENTION_DROPOUT,
-                    hidden_dropout=config.HIDDEN_DROPOUT,
-                    feat_proj_dropout=dropout,
-                    mask_time_prob=0.05,
-                    layerdrop=0.05
-                )
-        except Exception as e:
-            print(f"\n✗ Error loading Wav2Vec2 model: {e}")
-            print("\nTroubleshooting:")
-            print("1. If offline, run: python download_model.py")
-            print("2. Check internet connection")
-            print(f"3. Verify cache directory: {config.CACHE_DIR}")
-            raise
+    def forward(self, features, **kwargs):
+        x = features
+        x = self.dropout(x)
+        x = self.dense(x)
+        x = torch.tanh(x)
+        x = self.dropout(x)
+        x = self.out_proj(x)
+        return x
 
-        # Freeze feature extractor (CNN layers) if requested
-        if freeze_feature_extractor:
-            self.wav2vec2.feature_extractor._freeze_parameters()
 
-        # Get hidden size from config
-        hidden_size = self.wav2vec2.config.hidden_size
+class Wav2Vec2ForSpeechClassification(Wav2Vec2PreTrainedModel):
+    """
+    Wav2Vec2 model for speech classification with configurable pooling
+    """
 
-        # Classification head
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.Tanh(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, num_labels)
-        )
+    def __init__(self, config):
+        super().__init__(config)
+        self.num_labels = config.num_labels
+        self.pooling_mode = config.pooling_mode
+        self.config = config
 
-        self.num_labels = num_labels
+        self.wav2vec2 = Wav2Vec2Model(config)
+        self.classifier = Wav2Vec2ClassificationHead(config)
+
+        self.init_weights()
 
     def freeze_feature_extractor(self):
         """Freeze the feature extractor (CNN) parameters"""
@@ -90,10 +67,41 @@ class Wav2Vec2ForAudioClassification(nn.Module):
         for param in self.wav2vec2.feature_extractor.parameters():
             param.requires_grad = True
 
+    def merged_strategy(
+        self,
+        hidden_states,
+        mode="mean"
+    ):
+        """
+        Apply pooling strategy to hidden states
+
+        Args:
+            hidden_states: Hidden states from Wav2Vec2 (batch, time, hidden_size)
+            mode: Pooling mode ('mean', 'sum', or 'max')
+
+        Returns:
+            Pooled output (batch, hidden_size)
+        """
+        if mode == "mean":
+            outputs = torch.mean(hidden_states, dim=1)
+        elif mode == "sum":
+            outputs = torch.sum(hidden_states, dim=1)
+        elif mode == "max":
+            outputs = torch.max(hidden_states, dim=1)[0]
+        else:
+            raise Exception(
+                "The pooling method hasn't been defined! Your pooling mode must be one of these ['mean', 'sum', 'max']")
+
+        return outputs
+
     def forward(
         self,
-        input_values: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
+        input_values,
+        attention_mask=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+        labels=None,
     ):
         """
         Forward pass
@@ -101,170 +109,58 @@ class Wav2Vec2ForAudioClassification(nn.Module):
         Args:
             input_values: Raw audio waveform (batch_size, sequence_length)
             attention_mask: Attention mask (batch_size, sequence_length)
+            output_attentions: Whether to output attention weights
+            output_hidden_states: Whether to output hidden states
+            return_dict: Whether to return a ModelOutput object
+            labels: Labels for computing classification loss
 
         Returns:
-            Logits for classification (batch_size, num_labels)
+            SpeechClassifierOutput with loss, logits, hidden_states, attentions
         """
-        # Extract features with Wav2Vec2
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
         outputs = self.wav2vec2(
             input_values,
             attention_mask=attention_mask,
-            output_hidden_states=False
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
         )
 
-        # Get last hidden state
-        hidden_states = outputs.last_hidden_state  # (batch, time, hidden_size)
+        hidden_states = outputs[0]
+        hidden_states = self.merged_strategy(hidden_states, mode=self.pooling_mode)
+        logits = self.classifier(hidden_states)
 
-        # Mean pooling over time dimension
-        if attention_mask is not None:
-            # Mask out padding tokens before pooling
-            attention_mask = attention_mask.unsqueeze(-1)
-            hidden_states = hidden_states * attention_mask
-            pooled = hidden_states.sum(dim=1) / attention_mask.sum(dim=1)
-        else:
-            pooled = hidden_states.mean(dim=1)
+        loss = None
+        if labels is not None:
+            if self.config.problem_type is None:
+                if self.num_labels == 1:
+                    self.config.problem_type = "regression"
+                elif self.num_labels > 1 and (labels.dtype == torch.long or labels.dtype == torch.int):
+                    self.config.problem_type = "single_label_classification"
+                else:
+                    self.config.problem_type = "multi_label_classification"
 
-        # Classification
-        logits = self.classifier(pooled)
+            if self.config.problem_type == "regression":
+                loss_fct = MSELoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels)
+            elif self.config.problem_type == "single_label_classification":
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(logits.view(-1, self.num_labels), labels.view(-1))
+            elif self.config.problem_type == "multi_label_classification":
+                loss_fct = BCEWithLogitsLoss()
+                loss = loss_fct(logits, labels)
 
-        return logits
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return ((loss,) + output) if loss is not None else output
 
-
-class Wav2Vec2WithAttentionPooling(nn.Module):
-    """
-    Wav2Vec2 with attention-based pooling for better feature aggregation
-    """
-
-    def __init__(
-        self,
-        model_name: str = config.WAV2VEC2_MODEL_NAME,
-        num_labels: int = config.NUM_CLASSES,
-        dropout: float = config.DROPOUT,
-        freeze_feature_extractor: bool = config.FREEZE_FEATURE_EXTRACTOR
-    ):
-        super().__init__()
-
-        # Load pre-trained Wav2Vec2
-        try:
-            if config.USE_CACHE and os.path.exists(config.CACHE_DIR):
-                print(f"Loading model from cache: {config.CACHE_DIR}")
-                self.wav2vec2 = Wav2Vec2Model.from_pretrained(
-                    config.CACHE_DIR,
-                    local_files_only=True,
-                    attention_dropout=config.ATTENTION_DROPOUT,
-                    hidden_dropout=config.HIDDEN_DROPOUT,
-                    feat_proj_dropout=dropout
-                )
-            else:
-                print(f"Downloading model from HuggingFace: {model_name}")
-                self.wav2vec2 = Wav2Vec2Model.from_pretrained(
-                    model_name,
-                    cache_dir=config.CACHE_DIR if config.USE_CACHE else None,
-                    attention_dropout=config.ATTENTION_DROPOUT,
-                    hidden_dropout=config.HIDDEN_DROPOUT,
-                    feat_proj_dropout=dropout
-                )
-        except Exception as e:
-            print(f"\n✗ Error loading Wav2Vec2 model: {e}")
-            print("\nTroubleshooting:")
-            print("1. If offline, run: python download_model.py")
-            print("2. Check internet connection")
-            print(f"3. Verify cache directory: {config.CACHE_DIR}")
-            raise
-
-        if freeze_feature_extractor:
-            self.wav2vec2.feature_extractor._freeze_parameters()
-
-        hidden_size = self.wav2vec2.config.hidden_size
-
-        # Attention pooling
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.Tanh(),
-            nn.Linear(hidden_size // 2, 1)
+        return SpeechClassifierOutput(
+            loss=loss,
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
         )
-
-        # Classification head
-        self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size, hidden_size // 2),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_size // 2, num_labels)
-        )
-
-        self.num_labels = num_labels
-
-    def freeze_feature_extractor(self):
-        """Freeze the feature extractor parameters"""
-        self.wav2vec2.feature_extractor._freeze_parameters()
-
-    def unfreeze_feature_extractor(self):
-        """Unfreeze the feature extractor parameters"""
-        for param in self.wav2vec2.feature_extractor.parameters():
-            param.requires_grad = True
-
-    def forward(
-        self,
-        input_values: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
-    ):
-        """Forward pass with attention pooling"""
-        # Extract features
-        outputs = self.wav2vec2(
-            input_values,
-            attention_mask=attention_mask
-        )
-
-        hidden_states = outputs.last_hidden_state  # (batch, time, hidden)
-
-        # Attention pooling
-        attention_weights = self.attention(hidden_states)  # (batch, time, 1)
-        attention_weights = torch.softmax(attention_weights, dim=1)
-
-        # Weighted sum
-        pooled = (hidden_states * attention_weights).sum(dim=1)  # (batch, hidden)
-
-        # Classification
-        logits = self.classifier(pooled)
-
-        return logits
-
-
-def get_model(
-    model_type: str = "standard",
-    model_name: str = config.WAV2VEC2_MODEL_NAME,
-    num_labels: int = config.NUM_CLASSES,
-    **kwargs
-) -> nn.Module:
-    """
-    Get Wav2Vec2 model by type
-
-    Args:
-        model_type: Type of model ("standard" or "attention_pooling")
-        model_name: Pre-trained Wav2Vec2 model name
-        num_labels: Number of output classes
-        **kwargs: Additional arguments
-
-    Returns:
-        Wav2Vec2 model
-    """
-    if model_type == "standard":
-        return Wav2Vec2ForAudioClassification(
-            model_name=model_name,
-            num_labels=num_labels,
-            **kwargs
-        )
-    elif model_type == "attention_pooling":
-        return Wav2Vec2WithAttentionPooling(
-            model_name=model_name,
-            num_labels=num_labels,
-            **kwargs
-        )
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
 
 
 def count_parameters(model: nn.Module, trainable_only: bool = True) -> int:

@@ -1,300 +1,297 @@
 """
 Training script for Wav2Vec2-based infant cry classification
+Using HuggingFace Trainer and CTCTrainer (based on working notebook implementation)
 """
 import os
 import sys
 import argparse
-from datetime import datetime
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
-from transformers import get_linear_schedule_with_warmup
+from typing import Any, Dict, Union
+
 import numpy as np
+import torch
+from torch import nn
+from packaging import version
+
+from transformers import (
+    AutoConfig,
+    Trainer,
+    TrainingArguments,
+    is_apex_available,
+    set_seed,
+)
+
+if is_apex_available():
+    from apex import amp
+
+if version.parse(torch.__version__) >= version.parse("1.6"):
+    _is_native_amp_available = True
+    from torch.cuda.amp import autocast
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 import config
-from dataset import get_data_loaders
-from model import get_model, print_model_info
+from src.dataset import (
+    load_and_prepare_datasets,
+    DataCollatorCTCWithPadding,
+    compute_metrics
+)
+from src.model import Wav2Vec2ForSpeechClassification, print_model_info
 
 
-def train_epoch(model, train_loader, criterion, optimizer, scheduler, device, epoch,
-                gradient_accumulation_steps):
+class CTCTrainer(Trainer):
     """
-    Train for one epoch
+    Custom trainer for CTC-based models
+    Based on the working notebook implementation
+    """
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+        """
+        Perform a training step on a batch of inputs.
+
+        Args:
+            model: The model to train
+            inputs: The inputs and targets of the model
+
+        Returns:
+            The tensor with training loss on this batch
+        """
+        model.train()
+        inputs = self._prepare_inputs(inputs)
+
+        if self.use_amp:
+            with autocast():
+                loss = self.compute_loss(model, inputs)
+        else:
+            loss = self.compute_loss(model, inputs)
+
+        if self.args.gradient_accumulation_steps > 1:
+            loss = loss / self.args.gradient_accumulation_steps
+
+        if self.use_amp:
+            self.scaler.scale(loss).backward()
+        elif self.use_apex:
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
+        elif self.deepspeed:
+            self.deepspeed.backward(loss)
+        else:
+            loss.backward()
+
+        return loss.detach()
+
+
+def train(
+    dataset_path: str = config.DATASET_PATH,
+    output_dir: str = config.MODEL_DIR,
+    num_train_epochs: int = config.EPOCHS,
+    per_device_train_batch_size: int = config.BATCH_SIZE,
+    gradient_accumulation_steps: int = config.GRADIENT_ACCUMULATION_STEPS,
+    learning_rate: float = config.LEARNING_RATE,
+    warmup_steps: int = config.WARMUP_STEPS,
+    weight_decay: float = config.WEIGHT_DECAY,
+    logging_steps: int = 10,
+    eval_steps: int = 100,
+    save_steps: int = 100,
+    save_total_limit: int = 2,
+    fp16: bool = True,
+    seed: int = config.RANDOM_SEED,
+):
+    """
+    Train Wav2Vec2 model for infant cry classification
 
     Args:
-        model: Wav2Vec2 model
-        train_loader: Training data loader
-        criterion: Loss function
-        optimizer: Optimizer
-        scheduler: Learning rate scheduler
-        device: Device to train on
-        epoch: Current epoch number
-        gradient_accumulation_steps: Steps to accumulate gradients
-
-    Returns:
-        Average training loss and accuracy
+        dataset_path: Path to dataset directory
+        output_dir: Directory to save model checkpoints
+        num_train_epochs: Number of training epochs
+        per_device_train_batch_size: Batch size per device
+        gradient_accumulation_steps: Number of gradient accumulation steps
+        learning_rate: Learning rate
+        warmup_steps: Number of warmup steps
+        weight_decay: Weight decay
+        logging_steps: Log every N steps
+        eval_steps: Evaluate every N steps
+        save_steps: Save checkpoint every N steps
+        save_total_limit: Maximum number of checkpoints to keep
+        fp16: Whether to use mixed precision training
+        seed: Random seed
     """
-    model.train()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-    optimizer.zero_grad()
+    # Set seed for reproducibility
+    set_seed(seed)
 
-    for batch_idx, batch in enumerate(train_loader):
-        input_values = batch['input_values'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['labels'].to(device)
+    print("="*80)
+    print("Wav2Vec2 Infant Cry Classification Training")
+    print("="*80)
 
-        # Forward pass
-        outputs = model(input_values, attention_mask=attention_mask)
-        loss = criterion(outputs, labels)
+    # Load and prepare datasets
+    print("\nLoading and preparing datasets...")
+    train_dataset, eval_dataset, test_dataset, feature_extractor, label_list, num_labels = \
+        load_and_prepare_datasets(
+            dataset_path=dataset_path,
+            save_path=os.path.dirname(output_dir),
+            model_name=config.WAV2VEC2_MODEL_NAME
+        )
 
-        # Normalize loss for gradient accumulation
-        loss = loss / gradient_accumulation_steps
-        loss.backward()
+    print(f"\nDataset loaded:")
+    print(f"  Training samples: {len(train_dataset)}")
+    print(f"  Validation samples: {len(eval_dataset)}")
+    print(f"  Test samples: {len(test_dataset)}")
+    print(f"  Number of classes: {num_labels}")
+    print(f"  Classes: {label_list}")
 
-        # Update weights every gradient_accumulation_steps
-        if (batch_idx + 1) % gradient_accumulation_steps == 0:
-            # Clip gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
+    # Create label mappings
+    label2id = {label: i for i, label in enumerate(label_list)}
+    id2label = {i: label for i, label in enumerate(label_list)}
 
-        # Statistics
-        running_loss += loss.item() * gradient_accumulation_steps
-        _, predicted = outputs.max(1)
-        total += labels.size(0)
-        correct += predicted.eq(labels).sum().item()
-
-        if batch_idx % 10 == 0:
-            print(f'Epoch: {epoch} [{batch_idx}/{len(train_loader)}] '
-                  f'Loss: {loss.item() * gradient_accumulation_steps:.4f} '
-                  f'Acc: {100.*correct/total:.2f}% '
-                  f'LR: {scheduler.get_last_lr()[0]:.2e}')
-
-    avg_loss = running_loss / len(train_loader)
-    accuracy = 100. * correct / total
-
-    return avg_loss, accuracy
-
-
-def validate(model, val_loader, criterion, device):
-    """
-    Validate the model
-
-    Args:
-        model: Wav2Vec2 model
-        val_loader: Validation data loader
-        criterion: Loss function
-        device: Device to validate on
-
-    Returns:
-        Average validation loss and accuracy
-    """
-    model.eval()
-    running_loss = 0.0
-    correct = 0
-    total = 0
-
-    with torch.no_grad():
-        for batch in val_loader:
-            input_values = batch['input_values'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-
-            # Forward pass
-            outputs = model(input_values, attention_mask=attention_mask)
-            loss = criterion(outputs, labels)
-
-            # Statistics
-            running_loss += loss.item()
-            _, predicted = outputs.max(1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
-
-    avg_loss = running_loss / len(val_loader)
-    accuracy = 100. * correct / total
-
-    return avg_loss, accuracy
-
-
-def train(args):
-    """
-    Main training function
-
-    Args:
-        args: Command line arguments
-    """
-    # Set device
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Using device: {device}')
-    if torch.cuda.is_available():
-        print(f'GPU: {torch.cuda.get_device_name(0)}')
-        print(f'GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB')
-
-    # Create data loaders
-    print('\nLoading dataset...')
-    train_loader, val_loader, test_loader, class_weights = get_data_loaders(
-        batch_size=args.batch_size,
-        dataset_path=args.data_path,
-        use_weighted_sampler=args.use_weighted_sampler
+    # Create model configuration
+    print(f"\nCreating model configuration...")
+    model_config = AutoConfig.from_pretrained(
+        config.WAV2VEC2_MODEL_NAME,
+        num_labels=num_labels,
+        label2id=label2id,
+        id2label=id2label,
+        finetuning_task="wav2vec2_clf",
     )
+
+    # Add custom config parameters
+    setattr(model_config, 'pooling_mode', config.POOLING_MODE)
+    setattr(model_config, 'final_dropout', config.FINAL_DROPOUT)
 
     # Create model
-    print(f'\nCreating Wav2Vec2 model...')
-    print(f'Model: {args.model_name}')
-    print(f'Model type: {args.model_type}')
-
-    model = get_model(
-        model_type=args.model_type,
-        model_name=args.model_name,
-        num_labels=config.NUM_CLASSES,
-        dropout=config.DROPOUT,
-        freeze_feature_extractor=config.FREEZE_FEATURE_EXTRACTOR
+    print(f"\nLoading pre-trained Wav2Vec2 model: {config.WAV2VEC2_MODEL_NAME}")
+    model = Wav2Vec2ForSpeechClassification.from_pretrained(
+        config.WAV2VEC2_MODEL_NAME,
+        config=model_config,
     )
-    model = model.to(device)
+
+    # Freeze feature extractor if specified
+    if config.FREEZE_FEATURE_EXTRACTOR:
+        print("\nFreezing feature extractor (CNN layers)")
+        model.freeze_feature_extractor()
 
     # Print model info
     print_model_info(model)
 
-    # Loss function and optimizer
-    if args.use_class_weights:
-        class_weights = class_weights.to(device)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-        print("\nUsing weighted CrossEntropyLoss with class weights")
-    else:
-        criterion = nn.CrossEntropyLoss()
-        print("\nUsing standard CrossEntropyLoss")
-
-    # Optimizer - different learning rates for pretrained and new layers
-    optimizer = optim.AdamW([
-        {'params': model.wav2vec2.parameters(), 'lr': args.learning_rate},
-        {'params': model.classifier.parameters(), 'lr': args.learning_rate * 10}
-    ], weight_decay=config.WEIGHT_DECAY)
-
-    # Learning rate scheduler with warmup
-    num_training_steps = len(train_loader) * args.epochs // config.GRADIENT_ACCUMULATION_STEPS
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=config.WARMUP_STEPS,
-        num_training_steps=num_training_steps
+    # Create data collator
+    data_collator = DataCollatorCTCWithPadding(
+        feature_extractor=feature_extractor,
+        padding=True
     )
 
-    # TensorBoard writer
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_dir = os.path.join(config.LOG_DIR, f'wav2vec2_{timestamp}')
-    writer = SummaryWriter(log_dir)
+    # Define training arguments
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        per_device_train_batch_size=per_device_train_batch_size,
+        per_device_eval_batch_size=per_device_train_batch_size,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        evaluation_strategy="steps",
+        num_train_epochs=num_train_epochs,
+        fp16=fp16,
+        save_steps=save_steps,
+        eval_steps=eval_steps,
+        logging_steps=logging_steps,
+        learning_rate=learning_rate,
+        save_total_limit=save_total_limit,
+        warmup_steps=warmup_steps,
+        weight_decay=weight_decay,
+        load_best_model_at_end=False,
+        metric_for_best_model="accuracy",
+        greater_is_better=True,
+        push_to_hub=False,
+        remove_unused_columns=True,
+        report_to=['tensorboard'],
+        seed=seed,
+        dataloader_num_workers=2,
+        dataloader_pin_memory=True,
+    )
 
-    # Training loop
-    best_val_acc = 0.0
-    best_model_path = os.path.join(config.MODEL_DIR, 'best_wav2vec2.pth')
+    # Create trainer
+    print("\nInitializing trainer...")
+    trainer = CTCTrainer(
+        model=model,
+        data_collator=data_collator,
+        args=training_args,
+        compute_metrics=compute_metrics,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        tokenizer=feature_extractor,
+    )
 
-    print('\nStarting training...')
-    for epoch in range(1, args.epochs + 1):
-        print(f'\n{"="*60}')
-        print(f'Epoch {epoch}/{args.epochs}')
-        print(f'{"="*60}')
+    # Train
+    print("\n" + "="*80)
+    print("Starting training...")
+    print("="*80 + "\n")
 
-        # Unfreeze feature extractor after FREEZE_EPOCHS
-        if epoch == config.FREEZE_EPOCHS + 1 and config.FREEZE_FEATURE_EXTRACTOR:
-            print("\nUnfreezing feature extractor...")
-            model.unfreeze_feature_extractor()
-            print_model_info(model)
+    torch.cuda.empty_cache()
+    train_result = trainer.train()
 
-        # Train
-        train_loss, train_acc = train_epoch(
-            model, train_loader, criterion, optimizer, scheduler, device, epoch,
-            config.GRADIENT_ACCUMULATION_STEPS
-        )
+    # Save final model
+    print("\nSaving final model...")
+    trainer.save_model()
 
-        # Validate
-        val_loss, val_acc = validate(model, val_loader, criterion, device)
+    # Save training metrics
+    metrics = train_result.metrics
+    trainer.log_metrics("train", metrics)
+    trainer.save_metrics("train", metrics)
+    trainer.save_state()
 
-        # Print epoch summary
-        print(f'\nEpoch {epoch} Summary:')
-        print(f'Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%')
-        print(f'Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%')
+    # Evaluate on validation set
+    print("\n" + "="*80)
+    print("Evaluating on validation set...")
+    print("="*80 + "\n")
 
-        # TensorBoard logging
-        writer.add_scalar('Loss/train', train_loss, epoch)
-        writer.add_scalar('Loss/val', val_loss, epoch)
-        writer.add_scalar('Accuracy/train', train_acc, epoch)
-        writer.add_scalar('Accuracy/val', val_acc, epoch)
-        writer.add_scalar('Learning_rate', scheduler.get_last_lr()[0], epoch)
+    eval_metrics = trainer.evaluate()
+    trainer.log_metrics("eval", eval_metrics)
+    trainer.save_metrics("eval", eval_metrics)
 
-        # Save best model
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'val_acc': val_acc,
-                'val_loss': val_loss,
-                'config': {
-                    'model_name': args.model_name,
-                    'model_type': args.model_type,
-                    'num_classes': config.NUM_CLASSES
-                }
-            }, best_model_path)
-            print(f'Best model saved with val_acc: {val_acc:.2f}%')
+    print(f"\nValidation Results:")
+    print(f"  Accuracy: {eval_metrics['eval_accuracy']:.4f}")
+    print(f"  Loss: {eval_metrics['eval_loss']:.4f}")
 
-        # Save checkpoint
-        if epoch % args.save_freq == 0:
-            checkpoint_path = os.path.join(
-                config.CHECKPOINT_DIR, f'wav2vec2_epoch_{epoch}.pth'
-            )
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'val_acc': val_acc,
-                'val_loss': val_loss,
-            }, checkpoint_path)
+    print("\n" + "="*80)
+    print("Training completed!")
+    print(f"Model saved to: {output_dir}")
+    print("="*80)
 
-    print('\nTraining completed!')
-    print(f'Best validation accuracy: {best_val_acc:.2f}%')
-    print(f'Best model saved at: {best_model_path}')
-
-    writer.close()
+    return trainer
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Train Wav2Vec2 infant cry classification model')
-    parser.add_argument('--data-path', type=str, default=config.DATASET_PATH,
-                       help='Path to dataset')
-    parser.add_argument('--model-name', type=str, default=config.WAV2VEC2_MODEL_NAME,
-                       help='Wav2Vec2 model name (e.g., facebook/wav2vec2-base)')
-    parser.add_argument('--model-type', type=str, default='standard',
-                       choices=['standard', 'attention_pooling'],
-                       help='Model type (standard or attention_pooling)')
-    parser.add_argument('--batch-size', type=int, default=config.BATCH_SIZE,
-                       help='Batch size')
+def main():
+    """Main training function"""
+    parser = argparse.ArgumentParser(description='Train Wav2Vec2 for infant cry classification')
+
+    parser.add_argument('--dataset_path', type=str, default=config.DATASET_PATH,
+                        help='Path to dataset directory')
+    parser.add_argument('--output_dir', type=str, default=config.MODEL_DIR,
+                        help='Output directory for model checkpoints')
     parser.add_argument('--epochs', type=int, default=config.EPOCHS,
-                       help='Number of epochs')
-    parser.add_argument('--learning-rate', type=float, default=config.LEARNING_RATE,
-                       help='Learning rate')
-    parser.add_argument('--save-freq', type=int, default=5,
-                       help='Save checkpoint every N epochs')
-    parser.add_argument('--use-class-weights', action='store_true',
-                       default=config.USE_CLASS_WEIGHTS,
-                       help='Use class weights in loss function')
-    parser.add_argument('--use-weighted-sampler', action='store_true',
-                       default=config.USE_WEIGHTED_SAMPLER,
-                       help='Use weighted random sampler for training')
-    parser.add_argument('--no-class-weights', dest='use_class_weights',
-                       action='store_false',
-                       help='Disable class weights')
-    parser.add_argument('--no-weighted-sampler', dest='use_weighted_sampler',
-                       action='store_false',
-                       help='Disable weighted sampler')
+                        help='Number of training epochs')
+    parser.add_argument('--batch_size', type=int, default=config.BATCH_SIZE,
+                        help='Batch size per device')
+    parser.add_argument('--learning_rate', type=float, default=config.LEARNING_RATE,
+                        help='Learning rate')
+    parser.add_argument('--seed', type=int, default=config.RANDOM_SEED,
+                        help='Random seed')
+    parser.add_argument('--no_fp16', action='store_true',
+                        help='Disable mixed precision training')
 
     args = parser.parse_args()
-    train(args)
+
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Train model
+    trainer = train(
+        dataset_path=args.dataset_path,
+        output_dir=args.output_dir,
+        num_train_epochs=args.epochs,
+        per_device_train_batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        fp16=not args.no_fp16,
+        seed=args.seed,
+    )
+
+    return trainer
+
+
+if __name__ == "__main__":
+    main()
