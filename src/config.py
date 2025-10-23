@@ -1,5 +1,5 @@
 """
-Configuration file for infant cry classification project
+Configuration file for infant cry classification project using Wav2Vec2
 """
 import os
 
@@ -8,23 +8,34 @@ DATASET_PATH = "/kaggle/input/infant-cry-audio-corpus/donateacry_corpus"
 CLASSES = ['belly_pain', 'burping', 'discomfort', 'hungry', 'tired']
 NUM_CLASSES = len(CLASSES)
 
-# Audio processing configuration
-SAMPLE_RATE = 16000  # Target sample rate
-DURATION = 3  # Fixed duration in seconds
-N_MELS = 128  # Number of mel bands
-N_FFT = 2048  # FFT window size
-HOP_LENGTH = 512  # Hop length for STFT
+# Wav2Vec2 model configuration
+WAV2VEC2_MODEL_NAME = "facebook/wav2vec2-base"  # Pre-trained model
+# Alternative models:
+# "facebook/wav2vec2-large" - Larger model, better performance
+# "facebook/wav2vec2-base-960h" - Fine-tuned on LibriSpeech
 
-# Model configuration
-INPUT_SHAPE = (N_MELS, int(SAMPLE_RATE * DURATION / HOP_LENGTH) + 1)
+# Audio processing configuration
+SAMPLE_RATE = 16000  # Wav2Vec2 requires 16kHz
+MAX_DURATION = 5.0  # Maximum duration in seconds
+TARGET_LENGTH = int(SAMPLE_RATE * MAX_DURATION)  # 80000 samples
 
 # Training configuration
-BATCH_SIZE = 32
-EPOCHS = 50
-LEARNING_RATE = 0.001
+BATCH_SIZE = 8  # Smaller batch size for Wav2Vec2 (memory intensive)
+GRADIENT_ACCUMULATION_STEPS = 4  # Effective batch size = 8 * 4 = 32
+EPOCHS = 20  # Fewer epochs needed with pre-trained model
+LEARNING_RATE = 3e-5  # Lower learning rate for fine-tuning
+WARMUP_STEPS = 500
+WEIGHT_DECAY = 0.01
 VALIDATION_SPLIT = 0.2
 TEST_SPLIT = 0.1
 RANDOM_SEED = 42
+
+# Model training settings
+FREEZE_FEATURE_EXTRACTOR = True  # Freeze Wav2Vec2 CNN layers initially
+FREEZE_EPOCHS = 5  # Unfreeze after this many epochs
+DROPOUT = 0.1
+ATTENTION_DROPOUT = 0.1
+HIDDEN_DROPOUT = 0.1
 
 # Class balancing configuration
 USE_CLASS_WEIGHTS = True  # Use weighted loss function

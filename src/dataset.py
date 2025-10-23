@@ -1,5 +1,5 @@
 """
-Dataset class for infant cry classification
+Dataset class for Wav2Vec2-based infant cry classification
 """
 import os
 from pathlib import Path
@@ -10,12 +10,12 @@ from torch.utils.data import Dataset, WeightedRandomSampler
 from sklearn.model_selection import train_test_split
 from sklearn.utils.class_weight import compute_class_weight
 import config
-from audio_utils import preprocess_audio, load_audio, audio_to_melspectrogram, augment_audio
+from audio_utils import load_audio, pad_or_truncate, augment_audio
 
 
 class InfantCryDataset(Dataset):
     """
-    PyTorch Dataset for infant cry classification
+    PyTorch Dataset for infant cry classification using raw audio
     """
 
     def __init__(self, file_paths: List[str], labels: List[int],
@@ -43,7 +43,7 @@ class InfantCryDataset(Dataset):
             idx: Sample index
 
         Returns:
-            Tuple of (mel_spectrogram, label)
+            Tuple of (audio_tensor, label)
         """
         file_path = self.file_paths[idx]
         label = self.labels[idx]
@@ -55,16 +55,43 @@ class InfantCryDataset(Dataset):
         if self.augment:
             audio = augment_audio(audio)
 
-        # Convert to mel spectrogram
-        mel_spec = audio_to_melspectrogram(audio)
+        # Pad or truncate to fixed length
+        audio = pad_or_truncate(audio)
 
-        # Normalize
-        mel_spec = (mel_spec - mel_spec.mean()) / (mel_spec.std() + 1e-8)
+        # Convert to tensor
+        audio_tensor = torch.FloatTensor(audio)
 
-        # Convert to tensor and add channel dimension
-        mel_spec_tensor = torch.FloatTensor(mel_spec).unsqueeze(0)
+        return audio_tensor, label
 
-        return mel_spec_tensor, label
+
+def collate_fn_wav2vec2(batch):
+    """
+    Custom collate function for Wav2Vec2 that handles batching properly
+
+    Args:
+        batch: List of (audio, label) tuples
+
+    Returns:
+        Dictionary with input_values, attention_mask, and labels
+    """
+    from audio_utils import get_processor
+
+    audios = [item[0].numpy() for item in batch]
+    labels = [item[1] for item in batch]
+
+    # Process batch with Wav2Vec2 processor
+    processor = get_processor()
+    inputs = processor(
+        audios,
+        sampling_rate=config.SAMPLE_RATE,
+        return_tensors="pt",
+        padding=True,
+        return_attention_mask=True
+    )
+
+    inputs['labels'] = torch.tensor(labels, dtype=torch.long)
+
+    return inputs
 
 
 def load_dataset(dataset_path: str = config.DATASET_PATH) -> Tuple[List[str], List[int]]:
@@ -238,19 +265,31 @@ def get_data_loaders(batch_size: int = config.BATCH_SIZE,
         shuffle = True
         print("\nUsing standard random shuffling for training")
 
-    # Create data loaders
+    # Create data loaders with custom collate function
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=batch_size,
         sampler=train_sampler,
         shuffle=shuffle if train_sampler is None else False,
-        num_workers=4
+        collate_fn=collate_fn_wav2vec2,
+        num_workers=2,  # Reduced for Wav2Vec2
+        pin_memory=True
     )
     val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn_wav2vec2,
+        num_workers=2,
+        pin_memory=True
     )
     test_loader = torch.utils.data.DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False, num_workers=4
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn_wav2vec2,
+        num_workers=2,
+        pin_memory=True
     )
 
     return train_loader, val_loader, test_loader, class_weights

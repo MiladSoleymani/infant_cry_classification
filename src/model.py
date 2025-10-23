@@ -1,212 +1,259 @@
 """
-Deep learning model architectures for infant cry classification
+Wav2Vec2-based model architectures for infant cry classification
 """
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+from transformers import Wav2Vec2Model, Wav2Vec2Config
+from typing import Optional
 import config
 
 
-class CNNModel(nn.Module):
+class Wav2Vec2ForAudioClassification(nn.Module):
     """
-    Convolutional Neural Network for audio classification
+    Wav2Vec2 model with classification head for infant cry classification
     """
 
-    def __init__(self, num_classes: int = config.NUM_CLASSES):
+    def __init__(
+        self,
+        model_name: str = config.WAV2VEC2_MODEL_NAME,
+        num_labels: int = config.NUM_CLASSES,
+        dropout: float = config.DROPOUT,
+        freeze_feature_extractor: bool = config.FREEZE_FEATURE_EXTRACTOR
+    ):
         """
-        Initialize CNN model
+        Initialize Wav2Vec2 classification model
 
         Args:
-            num_classes: Number of output classes
+            model_name: Pre-trained Wav2Vec2 model name
+            num_labels: Number of output classes
+            dropout: Dropout probability
+            freeze_feature_extractor: Whether to freeze CNN feature extractor
         """
-        super(CNNModel, self).__init__()
+        super().__init__()
 
-        # Convolutional layers
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(32)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(64)
-        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm2d(128)
-        self.conv4 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
-        self.bn4 = nn.BatchNorm2d(256)
+        # Load pre-trained Wav2Vec2 model
+        self.wav2vec2 = Wav2Vec2Model.from_pretrained(
+            model_name,
+            attention_dropout=config.ATTENTION_DROPOUT,
+            hidden_dropout=config.HIDDEN_DROPOUT,
+            feat_proj_dropout=dropout,
+            mask_time_prob=0.05,  # Reduced masking for fine-tuning
+            layerdrop=0.05
+        )
 
-        # Pooling and dropout
-        self.pool = nn.MaxPool2d(2, 2)
-        self.dropout = nn.Dropout(0.5)
+        # Freeze feature extractor (CNN layers) if requested
+        if freeze_feature_extractor:
+            self.wav2vec2.feature_extractor._freeze_parameters()
 
-        # Calculate the size after convolutions and pooling
-        # Input: (batch, 1, 128, ~94) -> After 4 poolings: (batch, 256, 8, 5)
-        self.fc1 = nn.Linear(256 * 8 * 5, 512)
-        self.fc2 = nn.Linear(512, 256)
-        self.fc3 = nn.Linear(256, num_classes)
+        # Get hidden size from config
+        hidden_size = self.wav2vec2.config.hidden_size
 
-    def forward(self, x):
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, num_labels)
+        )
+
+        self.num_labels = num_labels
+
+    def freeze_feature_extractor(self):
+        """Freeze the feature extractor (CNN) parameters"""
+        self.wav2vec2.feature_extractor._freeze_parameters()
+
+    def unfreeze_feature_extractor(self):
+        """Unfreeze the feature extractor parameters"""
+        for param in self.wav2vec2.feature_extractor.parameters():
+            param.requires_grad = True
+
+    def forward(
+        self,
+        input_values: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None
+    ):
         """
         Forward pass
 
         Args:
-            x: Input tensor (batch, 1, height, width)
+            input_values: Raw audio waveform (batch_size, sequence_length)
+            attention_mask: Attention mask (batch_size, sequence_length)
 
         Returns:
-            Output logits (batch, num_classes)
+            Logits for classification (batch_size, num_labels)
         """
-        # Conv block 1
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = F.relu(x)
-        x = self.pool(x)
+        # Extract features with Wav2Vec2
+        outputs = self.wav2vec2(
+            input_values,
+            attention_mask=attention_mask,
+            output_hidden_states=False
+        )
 
-        # Conv block 2
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = F.relu(x)
-        x = self.pool(x)
+        # Get last hidden state
+        hidden_states = outputs.last_hidden_state  # (batch, time, hidden_size)
 
-        # Conv block 3
-        x = self.conv3(x)
-        x = self.bn3(x)
-        x = F.relu(x)
-        x = self.pool(x)
+        # Mean pooling over time dimension
+        if attention_mask is not None:
+            # Mask out padding tokens before pooling
+            attention_mask = attention_mask.unsqueeze(-1)
+            hidden_states = hidden_states * attention_mask
+            pooled = hidden_states.sum(dim=1) / attention_mask.sum(dim=1)
+        else:
+            pooled = hidden_states.mean(dim=1)
 
-        # Conv block 4
-        x = self.conv4(x)
-        x = self.bn4(x)
-        x = F.relu(x)
-        x = self.pool(x)
+        # Classification
+        logits = self.classifier(pooled)
 
-        # Flatten
-        x = x.view(x.size(0), -1)
-
-        # Fully connected layers
-        x = self.fc1(x)
-        x = F.relu(x)
-        x = self.dropout(x)
-
-        x = self.fc2(x)
-        x = F.relu(x)
-        x = self.dropout(x)
-
-        x = self.fc3(x)
-
-        return x
+        return logits
 
 
-class ResidualBlock(nn.Module):
+class Wav2Vec2WithAttentionPooling(nn.Module):
     """
-    Residual block for ResNet-like architecture
+    Wav2Vec2 with attention-based pooling for better feature aggregation
     """
 
-    def __init__(self, in_channels, out_channels, stride=1):
-        super(ResidualBlock, self).__init__()
+    def __init__(
+        self,
+        model_name: str = config.WAV2VEC2_MODEL_NAME,
+        num_labels: int = config.NUM_CLASSES,
+        dropout: float = config.DROPOUT,
+        freeze_feature_extractor: bool = config.FREEZE_FEATURE_EXTRACTOR
+    ):
+        super().__init__()
 
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3,
-                              stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3,
-                              stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        # Load pre-trained Wav2Vec2
+        self.wav2vec2 = Wav2Vec2Model.from_pretrained(
+            model_name,
+            attention_dropout=config.ATTENTION_DROPOUT,
+            hidden_dropout=config.HIDDEN_DROPOUT,
+            feat_proj_dropout=dropout
+        )
 
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_channels != out_channels:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1,
-                         stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels)
-            )
+        if freeze_feature_extractor:
+            self.wav2vec2.feature_extractor._freeze_parameters()
 
-    def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out += self.shortcut(x)
-        out = F.relu(out)
-        return out
+        hidden_size = self.wav2vec2.config.hidden_size
+
+        # Attention pooling
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Tanh(),
+            nn.Linear(hidden_size // 2, 1)
+        )
+
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, num_labels)
+        )
+
+        self.num_labels = num_labels
+
+    def freeze_feature_extractor(self):
+        """Freeze the feature extractor parameters"""
+        self.wav2vec2.feature_extractor._freeze_parameters()
+
+    def unfreeze_feature_extractor(self):
+        """Unfreeze the feature extractor parameters"""
+        for param in self.wav2vec2.feature_extractor.parameters():
+            param.requires_grad = True
+
+    def forward(
+        self,
+        input_values: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None
+    ):
+        """Forward pass with attention pooling"""
+        # Extract features
+        outputs = self.wav2vec2(
+            input_values,
+            attention_mask=attention_mask
+        )
+
+        hidden_states = outputs.last_hidden_state  # (batch, time, hidden)
+
+        # Attention pooling
+        attention_weights = self.attention(hidden_states)  # (batch, time, 1)
+        attention_weights = torch.softmax(attention_weights, dim=1)
+
+        # Weighted sum
+        pooled = (hidden_states * attention_weights).sum(dim=1)  # (batch, hidden)
+
+        # Classification
+        logits = self.classifier(pooled)
+
+        return logits
 
 
-class ResNetModel(nn.Module):
+def get_model(
+    model_type: str = "standard",
+    model_name: str = config.WAV2VEC2_MODEL_NAME,
+    num_labels: int = config.NUM_CLASSES,
+    **kwargs
+) -> nn.Module:
     """
-    ResNet-like model for audio classification
-    """
-
-    def __init__(self, num_classes: int = config.NUM_CLASSES):
-        """
-        Initialize ResNet model
-
-        Args:
-            num_classes: Number of output classes
-        """
-        super(ResNetModel, self).__init__()
-
-        self.conv1 = nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.pool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-
-        # Residual blocks
-        self.layer1 = self._make_layer(64, 64, 2, stride=1)
-        self.layer2 = self._make_layer(64, 128, 2, stride=2)
-        self.layer3 = self._make_layer(128, 256, 2, stride=2)
-
-        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(256, num_classes)
-
-    def _make_layer(self, in_channels, out_channels, num_blocks, stride):
-        layers = []
-        layers.append(ResidualBlock(in_channels, out_channels, stride))
-        for _ in range(1, num_blocks):
-            layers.append(ResidualBlock(out_channels, out_channels, 1))
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        """
-        Forward pass
-
-        Args:
-            x: Input tensor (batch, 1, height, width)
-
-        Returns:
-            Output logits (batch, num_classes)
-        """
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = self.pool(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-
-        x = self.avg_pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-
-        return x
-
-
-def get_model(model_name: str = 'cnn', num_classes: int = config.NUM_CLASSES) -> nn.Module:
-    """
-    Get model by name
+    Get Wav2Vec2 model by type
 
     Args:
-        model_name: Name of the model ('cnn' or 'resnet')
-        num_classes: Number of output classes
+        model_type: Type of model ("standard" or "attention_pooling")
+        model_name: Pre-trained Wav2Vec2 model name
+        num_labels: Number of output classes
+        **kwargs: Additional arguments
 
     Returns:
-        PyTorch model
+        Wav2Vec2 model
     """
-    if model_name.lower() == 'cnn':
-        return CNNModel(num_classes)
-    elif model_name.lower() == 'resnet':
-        return ResNetModel(num_classes)
+    if model_type == "standard":
+        return Wav2Vec2ForAudioClassification(
+            model_name=model_name,
+            num_labels=num_labels,
+            **kwargs
+        )
+    elif model_type == "attention_pooling":
+        return Wav2Vec2WithAttentionPooling(
+            model_name=model_name,
+            num_labels=num_labels,
+            **kwargs
+        )
     else:
-        raise ValueError(f"Unknown model name: {model_name}")
+        raise ValueError(f"Unknown model type: {model_type}")
 
 
-def count_parameters(model: nn.Module) -> int:
+def count_parameters(model: nn.Module, trainable_only: bool = True) -> int:
     """
-    Count the number of trainable parameters in a model
+    Count model parameters
 
     Args:
         model: PyTorch model
+        trainable_only: Count only trainable parameters
 
     Returns:
-        Number of trainable parameters
+        Number of parameters
     """
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    if trainable_only:
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+    else:
+        return sum(p.numel() for p in model.parameters())
+
+
+def print_model_info(model: nn.Module):
+    """
+    Print model information
+
+    Args:
+        model: PyTorch model
+    """
+    total_params = count_parameters(model, trainable_only=False)
+    trainable_params = count_parameters(model, trainable_only=True)
+    frozen_params = total_params - trainable_params
+
+    print(f"\nModel Information:")
+    print(f"  Total parameters: {total_params:,}")
+    print(f"  Trainable parameters: {trainable_params:,}")
+    print(f"  Frozen parameters: {frozen_params:,}")
+    print(f"  Trainable percentage: {100 * trainable_params / total_params:.2f}%")
