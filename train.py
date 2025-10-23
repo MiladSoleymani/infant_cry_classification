@@ -185,7 +185,7 @@ def train(
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_train_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
-        evaluation_strategy="steps",
+        # evaluation_strategy="steps",
         num_train_epochs=num_train_epochs,
         fp16=fp16,
         save_steps=save_steps,
