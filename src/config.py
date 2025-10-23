@@ -47,8 +47,8 @@ HIDDEN_DROPOUT = 0.1
 FINAL_DROPOUT = 0.1  # Dropout for classification head
 
 # Class balancing configuration
-USE_CLASS_WEIGHTS = True  # Use weighted loss function
-USE_WEIGHTED_SAMPLER = True  # Use weighted random sampler for training
+USE_CLASS_WEIGHTS = False  # Use weighted loss function
+USE_WEIGHTED_SAMPLER = False  # Use weighted random sampler for training
 
 # Undersampling configuration
 USE_UNDERSAMPLING = True  # Whether to undersample majority classes
