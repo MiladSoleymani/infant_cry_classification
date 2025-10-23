@@ -9,7 +9,8 @@ CLASSES = ['belly_pain', 'burping', 'discomfort', 'hungry', 'tired']
 NUM_CLASSES = len(CLASSES)
 
 # Wav2Vec2 model configuration
-WAV2VEC2_MODEL_NAME = "facebook/wav2vec2-base"  # Pre-trained model
+# WAV2VEC2_MODEL_NAME = "facebook/wav2vec2-base"  # Pre-trained model
+WAV2VEC2_MODEL_NAME = "facebook/wav2vec2-base-100k-voxpopuli"
 # Alternative models:
 # "facebook/wav2vec2-large" - Larger model, better performance
 # "facebook/wav2vec2-base-960h" - Fine-tuned on LibriSpeech
