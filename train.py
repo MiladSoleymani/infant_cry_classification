@@ -44,13 +44,14 @@ class CTCTrainer(Trainer):
     Custom trainer for CTC-based models
     Based on the working notebook implementation
     """
-    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]]) -> torch.Tensor:
+    def training_step(self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None) -> torch.Tensor:
         """
         Perform a training step on a batch of inputs.
 
         Args:
             model: The model to train
             inputs: The inputs and targets of the model
+            num_items_in_batch: Number of items in the batch (for newer transformers versions)
 
         Returns:
             The tensor with training loss on this batch
