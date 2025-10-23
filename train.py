@@ -124,10 +124,12 @@ def train(
 
     # Load and prepare datasets
     print("\nLoading and preparing datasets...")
+    # Use current directory for CSV files if output_dir has no parent
+    csv_save_path = os.path.dirname(output_dir) if os.path.dirname(output_dir) else "."
     train_dataset, eval_dataset, test_dataset, feature_extractor, label_list, num_labels = \
         load_and_prepare_datasets(
             dataset_path=dataset_path,
-            save_path=os.path.dirname(output_dir),
+            save_path=csv_save_path,
             model_name=config.WAV2VEC2_MODEL_NAME
         )
 
