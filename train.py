@@ -202,6 +202,136 @@ def train(
     print(f"  Accuracy: {eval_metrics['eval_accuracy']:.4f}")
     print(f"  Loss: {eval_metrics['eval_loss']:.4f}")
 
+    # Generate detailed classification metrics
+    print("\n" + "="*80)
+    print("Computing detailed metrics (confusion matrix, precision, recall, F1)...")
+    print("="*80 + "\n")
+
+    # Get predictions on validation set
+    predictions = trainer.predict(eval_dataset)
+    pred_labels = predictions.predictions.argmax(-1)
+    true_labels = predictions.label_ids
+
+    # Compute classification metrics
+    from sklearn.metrics import (
+        confusion_matrix,
+        classification_report,
+        precision_recall_fscore_support,
+    )
+    import numpy as np
+
+    # Classification report
+    print("Classification Report:")
+    print("-" * 80)
+    report = classification_report(
+        true_labels,
+        pred_labels,
+        target_names=label_list,
+        digits=4
+    )
+    print(report)
+
+    # Per-class metrics
+    precision, recall, f1, support = precision_recall_fscore_support(
+        true_labels, pred_labels, average=None, labels=range(num_labels)
+    )
+
+    print("\nPer-Class Metrics:")
+    print("-" * 80)
+    print(f"{'Class':<15} {'Precision':<12} {'Recall':<12} {'F1-Score':<12} {'Support':<10}")
+    print("-" * 80)
+    for i, class_name in enumerate(label_list):
+        print(f"{class_name:<15} {precision[i]:<12.4f} {recall[i]:<12.4f} {f1[i]:<12.4f} {support[i]:<10}")
+
+    # Macro and weighted averages
+    precision_macro, recall_macro, f1_macro, _ = precision_recall_fscore_support(
+        true_labels, pred_labels, average='macro'
+    )
+    precision_weighted, recall_weighted, f1_weighted, _ = precision_recall_fscore_support(
+        true_labels, pred_labels, average='weighted'
+    )
+
+    print("-" * 80)
+    print(f"{'Macro Avg':<15} {precision_macro:<12.4f} {recall_macro:<12.4f} {f1_macro:<12.4f}")
+    print(f"{'Weighted Avg':<15} {precision_weighted:<12.4f} {recall_weighted:<12.4f} {f1_weighted:<12.4f}")
+    print("-" * 80)
+
+    # Confusion Matrix
+    cm = confusion_matrix(true_labels, pred_labels)
+    print("\nConfusion Matrix:")
+    print("-" * 80)
+
+    # Print header
+    header = "True\\Pred".ljust(15)
+    for class_name in label_list:
+        header += f"{class_name[:10]:<12}"
+    print(header)
+    print("-" * 80)
+
+    # Print matrix with row labels
+    for i, class_name in enumerate(label_list):
+        row = f"{class_name:<15}"
+        for j in range(len(label_list)):
+            row += f"{cm[i][j]:<12}"
+        print(row)
+    print("-" * 80)
+
+    # Save confusion matrix plot
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+
+        plt.figure(figsize=(10, 8))
+        sns.heatmap(
+            cm,
+            annot=True,
+            fmt='d',
+            cmap='Blues',
+            xticklabels=label_list,
+            yticklabels=label_list,
+            cbar_kws={'label': 'Count'}
+        )
+        plt.xlabel('Predicted Label', fontsize=12)
+        plt.ylabel('True Label', fontsize=12)
+        plt.title('Confusion Matrix - Validation Set', fontsize=14, fontweight='bold')
+        plt.tight_layout()
+
+        # Save plot
+        plot_path = os.path.join(output_dir, 'confusion_matrix.png')
+        plt.savefig(plot_path, dpi=300, bbox_inches='tight')
+        print(f"\n✓ Confusion matrix plot saved to: {plot_path}")
+        plt.close()
+    except Exception as e:
+        print(f"\n⚠ Could not save confusion matrix plot: {e}")
+
+    # Save metrics to JSON file
+    import json
+    detailed_metrics = {
+        'accuracy': float(eval_metrics['eval_accuracy']),
+        'loss': float(eval_metrics['eval_loss']),
+        'precision_macro': float(precision_macro),
+        'recall_macro': float(recall_macro),
+        'f1_macro': float(f1_macro),
+        'precision_weighted': float(precision_weighted),
+        'recall_weighted': float(recall_weighted),
+        'f1_weighted': float(f1_weighted),
+        'per_class_metrics': {
+            label_list[i]: {
+                'precision': float(precision[i]),
+                'recall': float(recall[i]),
+                'f1': float(f1[i]),
+                'support': int(support[i])
+            }
+            for i in range(num_labels)
+        },
+        'confusion_matrix': cm.tolist()
+    }
+
+    metrics_path = os.path.join(output_dir, 'detailed_metrics.json')
+    with open(metrics_path, 'w') as f:
+        json.dump(detailed_metrics, f, indent=2)
+    print(f"✓ Detailed metrics saved to: {metrics_path}")
+
     print("\n" + "="*80)
     print("Training completed!")
     print(f"Model saved to: {output_dir}")
