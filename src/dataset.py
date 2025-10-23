@@ -123,14 +123,39 @@ def prepare_dataset_csv(
     class_counts = df.groupby("label").count()[["path"]]
     print(class_counts)
 
-    # Apply undersampling if requested
+    # Split data into train, validation, and test sets FIRST (before any balancing)
+    print("\n" + "="*80)
+    print("Splitting dataset into train/validation/test...")
+    print("="*80)
+
+    train_df, rest_df = train_test_split(
+        df,
+        test_size=(val_split + test_split),
+        random_state=random_seed,
+        stratify=df["label"]
+    )
+
+    val_size_adjusted = val_split / (val_split + test_split)
+    val_df, test_df = train_test_split(
+        rest_df,
+        test_size=(1 - val_size_adjusted),
+        random_state=random_seed,
+        stratify=rest_df["label"]
+    )
+
+    print(f"Train: {len(train_df)} samples")
+    print(f"Validation: {len(val_df)} samples")
+    print(f"Test: {len(test_df)} samples")
+    print("="*80)
+
+    # Apply undersampling to TRAIN set only if requested
     if use_undersampling:
         print("\n" + "="*80)
-        print("Applying undersampling to balance classes...")
+        print("Applying undersampling to TRAINING set only...")
         print("="*80)
 
-        # Calculate target samples per class
-        counts = df["label"].value_counts()
+        # Calculate target samples per class IN TRAINING SET
+        counts = train_df["label"].value_counts()
 
         if undersampling_strategy == "minority":
             # Match the smallest class
@@ -151,12 +176,12 @@ def prepare_dataset_csv(
             target_samples = counts.min()
             print(f"Strategy: Default to minority class ({target_samples} samples per class)")
 
-        # Undersample each class
+        # Undersample each class in training set
         balanced_dfs = []
         np.random.seed(random_seed)
 
-        for class_name in df["label"].unique():
-            class_df = df[df["label"] == class_name]
+        for class_name in train_df["label"].unique():
+            class_df = train_df[train_df["label"] == class_name]
 
             if len(class_df) > target_samples:
                 # Randomly sample target_samples from this class
@@ -170,24 +195,24 @@ def prepare_dataset_csv(
             balanced_dfs.append(class_df_sampled)
 
         # Combine balanced dataframes
-        df = pd.concat(balanced_dfs, ignore_index=True)
+        train_df = pd.concat(balanced_dfs, ignore_index=True)
 
         # Shuffle the combined dataset
-        df = df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
+        train_df = train_df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
 
-        print(f"\nAfter undersampling: {len(df)} total samples")
-        print("\nBalanced class distribution:")
-        print(df.groupby("label").count()[["path"]])
+        print(f"\nAfter undersampling TRAIN set: {len(train_df)} total samples")
+        print("\nBalanced TRAIN class distribution:")
+        print(train_df.groupby("label").count()[["path"]])
         print("="*80)
 
-    # Apply oversampling if requested
+    # Apply oversampling to TRAIN set only if requested
     if use_oversampling:
         print("\n" + "="*80)
-        print("Applying oversampling with augmentation to balance classes...")
+        print("Applying oversampling with augmentation to TRAINING set only...")
         print("="*80)
 
-        # Calculate target samples per class
-        counts = df["label"].value_counts()
+        # Calculate target samples per class IN TRAINING SET
+        counts = train_df["label"].value_counts()
 
         if oversampling_strategy in ["auto", "majority"]:
             # Match the largest class
@@ -200,12 +225,12 @@ def prepare_dataset_csv(
             target_samples = counts.max()
             print(f"Strategy: Default to majority class ({target_samples} samples per class)")
 
-        # Oversample each class with augmentation markers
+        # Oversample each class in training set with augmentation markers
         balanced_dfs = []
         np.random.seed(random_seed)
 
-        for class_name in df["label"].unique():
-            class_df = df[df["label"] == class_name].copy()
+        for class_name in train_df["label"].unique():
+            class_df = train_df[train_df["label"] == class_name].copy()
             original_count = len(class_df)
 
             if original_count < target_samples:
@@ -240,35 +265,23 @@ def prepare_dataset_csv(
             balanced_dfs.append(class_df_sampled)
 
         # Combine balanced dataframes
-        df = pd.concat(balanced_dfs, ignore_index=True)
+        train_df = pd.concat(balanced_dfs, ignore_index=True)
 
         # Shuffle the combined dataset
-        df = df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
+        train_df = train_df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
 
-        print(f"\nAfter oversampling: {len(df)} total samples")
-        print("\nBalanced class distribution:")
-        print(df.groupby("label").count()[["path"]])
-        print(f"Augmented samples: {len(df[df['augmentation_id'] > 0])}")
+        print(f"\nAfter oversampling TRAIN set: {len(train_df)} total samples")
+        print("\nBalanced TRAIN class distribution:")
+        print(train_df.groupby("label").count()[["path"]])
+        print(f"Augmented samples in TRAIN: {len(train_df[train_df['augmentation_id'] > 0])}")
         print("="*80)
-    else:
-        # Add augmentation_id = 0 for all samples (no augmentation)
-        df["augmentation_id"] = 0
 
-    # Split data into train, validation, and test sets
-    train_df, rest_df = train_test_split(
-        df,
-        test_size=(val_split + test_split),
-        random_state=random_seed,
-        stratify=df["label"]
-    )
-
-    val_size_adjusted = val_split / (val_split + test_split)
-    val_df, test_df = train_test_split(
-        rest_df,
-        test_size=(1 - val_size_adjusted),
-        random_state=random_seed,
-        stratify=rest_df["label"]
-    )
+    # Add augmentation_id = 0 to all samples if no oversampling
+    # or to val/test sets which should never be augmented
+    if "augmentation_id" not in train_df.columns:
+        train_df["augmentation_id"] = 0
+    val_df["augmentation_id"] = 0
+    test_df["augmentation_id"] = 0
 
     # Reset indices
     train_df = train_df.reset_index(drop=True)
@@ -285,10 +298,16 @@ def prepare_dataset_csv(
     val_df.to_csv(val_csv, encoding="utf-8", index=False)
     test_df.to_csv(test_csv, encoding="utf-8", index=False)
 
-    print(f"\nDataset splits:")
-    print(f"  Training: {len(train_df)} samples")
-    print(f"  Validation: {len(val_df)} samples")
-    print(f"  Test: {len(test_df)} samples")
+    print(f"\nFinal dataset splits:")
+    print(f"  Training: {len(train_df)} samples (augmented: {len(train_df[train_df['augmentation_id'] > 0])})")
+    print(f"  Validation: {len(val_df)} samples (original only, no augmentation)")
+    print(f"  Test: {len(test_df)} samples (original only, no augmentation)")
+
+    print("\nValidation class distribution (original samples only):")
+    print(val_df.groupby("label").count()[["path"]])
+
+    print("\nTest class distribution (original samples only):")
+    print(test_df.groupby("label").count()[["path"]])
 
     return train_csv, val_csv, test_csv
 
