@@ -65,11 +65,12 @@ def prepare_dataset_csv(
     save_path: str = ".",
     val_split: float = config.VALIDATION_SPLIT,
     test_split: float = config.TEST_SPLIT,
-    random_seed: int = config.RANDOM_SEED
+    random_seed: int = config.RANDOM_SEED,
+    use_undersampling: bool = False,
+    undersampling_strategy: str = "auto"
 ):
     """
-    Prepare CSV files for dataset loading
-    Similar to the notebook's approach
+    Prepare CSV files for dataset loading with optional undersampling
 
     Args:
         dataset_path: Path to dataset root directory
@@ -77,6 +78,11 @@ def prepare_dataset_csv(
         val_split: Validation set proportion
         test_split: Test set proportion
         random_seed: Random seed for reproducibility
+        use_undersampling: Whether to apply undersampling to balance classes
+        undersampling_strategy: Strategy for undersampling
+            - "auto": Match the second-largest class count
+            - "minority": Match the smallest class count
+            - int: Specific number of samples per class
 
     Returns:
         Paths to train, validation, and test CSV files
@@ -106,7 +112,66 @@ def prepare_dataset_csv(
     # Create DataFrame
     df = pd.DataFrame(data)
     print(f"\nLoaded {len(df)} audio files from {len(config.CLASSES)} classes")
-    print(df.groupby("label").count()[["path"]])
+    print("\nOriginal class distribution:")
+    class_counts = df.groupby("label").count()[["path"]]
+    print(class_counts)
+
+    # Apply undersampling if requested
+    if use_undersampling:
+        print("\n" + "="*80)
+        print("Applying undersampling to balance classes...")
+        print("="*80)
+
+        # Calculate target samples per class
+        counts = df["label"].value_counts()
+
+        if undersampling_strategy == "minority":
+            # Match the smallest class
+            target_samples = counts.min()
+            print(f"Strategy: Match minority class ({target_samples} samples per class)")
+        elif undersampling_strategy == "auto":
+            # Match the second-largest class (to avoid too much data loss)
+            sorted_counts = counts.sort_values(ascending=False)
+            if len(sorted_counts) > 1:
+                target_samples = sorted_counts.iloc[1]
+            else:
+                target_samples = sorted_counts.iloc[0]
+            print(f"Strategy: Match second-largest class ({target_samples} samples per class)")
+        elif isinstance(undersampling_strategy, int):
+            target_samples = undersampling_strategy
+            print(f"Strategy: Fixed {target_samples} samples per class")
+        else:
+            target_samples = counts.min()
+            print(f"Strategy: Default to minority class ({target_samples} samples per class)")
+
+        # Undersample each class
+        balanced_dfs = []
+        np.random.seed(random_seed)
+
+        for class_name in df["label"].unique():
+            class_df = df[df["label"] == class_name]
+
+            if len(class_df) > target_samples:
+                # Randomly sample target_samples from this class
+                class_df_sampled = class_df.sample(n=target_samples, random_state=random_seed)
+                print(f"  {class_name}: {len(class_df)} → {target_samples} samples (undersampled)")
+            else:
+                # Keep all samples if class has fewer than target
+                class_df_sampled = class_df
+                print(f"  {class_name}: {len(class_df)} samples (kept all)")
+
+            balanced_dfs.append(class_df_sampled)
+
+        # Combine balanced dataframes
+        df = pd.concat(balanced_dfs, ignore_index=True)
+
+        # Shuffle the combined dataset
+        df = df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
+
+        print(f"\nAfter undersampling: {len(df)} total samples")
+        print("\nBalanced class distribution:")
+        print(df.groupby("label").count()[["path"]])
+        print("="*80)
 
     # Split data into train, validation, and test sets
     train_df, rest_df = train_test_split(
@@ -226,7 +291,9 @@ def preprocess_function(
 def load_and_prepare_datasets(
     dataset_path: str = config.DATASET_PATH,
     save_path: str = ".",
-    model_name: str = config.WAV2VEC2_MODEL_NAME
+    model_name: str = config.WAV2VEC2_MODEL_NAME,
+    use_undersampling: bool = False,
+    undersampling_strategy: str = "auto"
 ) -> tuple:
     """
     Load and prepare datasets using HuggingFace datasets library
@@ -236,12 +303,19 @@ def load_and_prepare_datasets(
         dataset_path: Path to dataset root directory
         save_path: Path to save CSV files
         model_name: Wav2Vec2 model name for feature extractor
+        use_undersampling: Whether to apply undersampling to balance classes
+        undersampling_strategy: Strategy for undersampling ("auto", "minority", or int)
 
     Returns:
-        Tuple of (train_dataset, eval_dataset, feature_extractor, label_list, num_labels)
+        Tuple of (train_dataset, eval_dataset, test_dataset, feature_extractor, label_list, num_labels)
     """
-    # Prepare CSV files
-    train_csv, val_csv, test_csv = prepare_dataset_csv(dataset_path, save_path)
+    # Prepare CSV files with optional undersampling
+    train_csv, val_csv, test_csv = prepare_dataset_csv(
+        dataset_path,
+        save_path,
+        use_undersampling=use_undersampling,
+        undersampling_strategy=undersampling_strategy
+    )
 
     # Load datasets from CSV
     data_files = {

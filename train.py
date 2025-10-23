@@ -77,13 +77,17 @@ def train(
 
     # Load and prepare datasets
     print("\nLoading and preparing datasets...")
+    if config.USE_UNDERSAMPLING:
+        print(f"⚖️  Undersampling enabled: strategy = '{config.UNDERSAMPLING_STRATEGY}'")
     # Use current directory for CSV files if output_dir has no parent
     csv_save_path = os.path.dirname(output_dir) if os.path.dirname(output_dir) else "."
     train_dataset, eval_dataset, test_dataset, feature_extractor, label_list, num_labels = \
         load_and_prepare_datasets(
             dataset_path=dataset_path,
             save_path=csv_save_path,
-            model_name=config.WAV2VEC2_MODEL_NAME
+            model_name=config.WAV2VEC2_MODEL_NAME,
+            use_undersampling=config.USE_UNDERSAMPLING,
+            undersampling_strategy=config.UNDERSAMPLING_STRATEGY
         )
 
     print(f"\nDataset loaded:")

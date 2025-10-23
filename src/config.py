@@ -50,6 +50,13 @@ FINAL_DROPOUT = 0.1  # Dropout for classification head
 USE_CLASS_WEIGHTS = True  # Use weighted loss function
 USE_WEIGHTED_SAMPLER = True  # Use weighted random sampler for training
 
+# Undersampling configuration
+USE_UNDERSAMPLING = False  # Whether to undersample majority classes
+UNDERSAMPLING_STRATEGY = "auto"  # "auto", "minority", or int (samples per class)
+# "auto" - Match second-largest class (recommended to avoid too much data loss)
+# "minority" - Match smallest class (most balanced but loses most data)
+# int (e.g., 50) - Fixed number of samples per class
+
 # Paths
 CHECKPOINT_DIR = "checkpoints"
 LOG_DIR = "logs"
